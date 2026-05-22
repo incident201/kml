@@ -277,7 +277,9 @@ class MainViewModel(
             if (calculatedEndTime == 0L) {
                 calculatedEndTime = currentNtpTime + durationMs
             }
-            val bootTime = SystemClock.elapsedRealtime()
+            val lockStartUtc = calculatedEndTime - durationMs
+            val elapsedSinceStart = (currentNtpTime - lockStartUtc).coerceAtLeast(0L)
+            val bootTime = SystemClock.elapsedRealtime() - elapsedSinceStart
             
             val saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs) &&
                                repository.setTransactionState(TransactionState.LOCKED)
@@ -379,7 +381,9 @@ class MainViewModel(
                     if (endTimeUtc == 0L) {
                         endTimeUtc = currentNtpTime + durationMs
                     }
-                    val bootTime = SystemClock.elapsedRealtime()
+                    val lockStartUtc = endTimeUtc - durationMs
+                    val elapsedSinceStart = (currentNtpTime - lockStartUtc).coerceAtLeast(0L)
+                    val bootTime = SystemClock.elapsedRealtime() - elapsedSinceStart
                     
                     val saveSuccess = repository.saveLockSession(endTimeUtc, bootTime, durationMs) &&
                                       repository.setTransactionState(TransactionState.LOCKED)
@@ -448,7 +452,9 @@ class MainViewModel(
                     if (calculatedEndTime == 0L) {
                         calculatedEndTime = currentNtpTime + durationMs
                     }
-                    val bootTime = SystemClock.elapsedRealtime()
+                    val lockStartUtc = calculatedEndTime - durationMs
+                    val elapsedSinceStart = (currentNtpTime - lockStartUtc).coerceAtLeast(0L)
+                    val bootTime = SystemClock.elapsedRealtime() - elapsedSinceStart
                     
                     val saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs) &&
                                       repository.setTransactionState(TransactionState.LOCKED)
