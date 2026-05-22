@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.security.crypto.EncryptedFile
 import androidx.security.crypto.MasterKey
+import com.example.util.SecurityKeyProvider
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -13,9 +14,7 @@ import java.io.OutputStream
 class CryptoManager(private val context: Context) {
 
     private val masterKey by lazy {
-        MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
+        SecurityKeyProvider.getMasterKey(context)
     }
 
     private val lockFile = File(context.filesDir, "locked_image.enc")
@@ -156,6 +155,7 @@ class CryptoManager(private val context: Context) {
             calculatedSha256.equals(expectedSha256, ignoreCase = true)
         } catch (e: Exception) {
             e.printStackTrace()
+            lastVerifyException = e
             false
         }
     }
@@ -260,5 +260,9 @@ class CryptoManager(private val context: Context) {
             success = lockFileTmp.delete() && !lockFileTmp.exists() && success
         }
         return success
+    }
+
+    companion object {
+        var lastVerifyException: Throwable? = null
     }
 }

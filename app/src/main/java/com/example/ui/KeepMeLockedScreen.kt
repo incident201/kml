@@ -14,6 +14,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -54,6 +56,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
     val isStatusUnknown by viewModel.isStatusUnknown.collectAsState()
     val cleanupFailed by viewModel.cleanupFailed.collectAsState()
     val isUnlockStateSaved by viewModel.isUnlockStateSaved.collectAsState()
+    val lastErrorDetails by viewModel.lastErrorDetails.collectAsState()
 
     val context = LocalContext.current
     var selectedUriStr by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
@@ -558,6 +561,26 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         color = MaterialTheme.colorScheme.error,
                         textAlign = TextAlign.Center
                     )
+                    lastErrorDetails?.let { details ->
+                        Spacer(Modifier.height(16.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 240.dp)
+                                .background(MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium)
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                text = details,
+                                style = androidx.compose.ui.text.TextStyle(
+                                    fontSize = androidx.compose.ui.unit.TextUnit.Unspecified,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                ),
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.verticalScroll(rememberScrollState())
+                            )
+                        }
+                    }
                     Spacer(Modifier.height(32.dp))
                     Button(onClick = { 
                         viewModel.completeAndClean()

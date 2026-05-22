@@ -63,6 +63,9 @@ class MainViewModel(
     private val _isUnlockStateSaved = MutableStateFlow(true)
     val isUnlockStateSaved: StateFlow<Boolean> = _isUnlockStateSaved.asStateFlow()
 
+    private val _lastErrorDetails = MutableStateFlow<String?>(null)
+    val lastErrorDetails: StateFlow<String?> = _lastErrorDetails.asStateFlow()
+
     private var timerJob: kotlinx.coroutines.Job? = null
 
     init {
@@ -196,6 +199,9 @@ class MainViewModel(
                             performLockboxFailureCleanup()
                         } else {
                             // Original not confirmed exists, but encrypted copy is gone or invalid. Critical loss/missing error.
+                            _lastErrorDetails.value = CryptoManager.lastVerifyException?.let {
+                                it.toString() + "\n" + it.stackTrace?.joinToString("\n") { ste -> "\tat " + ste.toString() }
+                            } ?: "No verify exception recorded"
                             _uiState.value = LockScreenState.MISSING_FILE
                         }
                     } else {
@@ -232,6 +238,9 @@ class MainViewModel(
                         cryptoManager.recoverableEncryptedFileIsValid(originalSha256)
                     }
                     if (!hasRecoverable) {
+                        _lastErrorDetails.value = CryptoManager.lastVerifyException?.let {
+                            it.toString() + "\n" + it.stackTrace?.joinToString("\n") { ste -> "\tat " + ste.toString() }
+                        } ?: "No verify exception recorded"
                         _uiState.value = LockScreenState.MISSING_FILE
                     } else {
                         val currentBootTime = SystemClock.elapsedRealtime()
@@ -250,6 +259,9 @@ class MainViewModel(
                         cryptoManager.recoverableEncryptedFileIsValid(originalSha256)
                     }
                     if (!hasRecoverable) {
+                        _lastErrorDetails.value = CryptoManager.lastVerifyException?.let {
+                            it.toString() + "\n" + it.stackTrace?.joinToString("\n") { ste -> "\tat " + ste.toString() }
+                        } ?: "No verify exception recorded"
                         _uiState.value = LockScreenState.MISSING_FILE
                     } else {
                         _isStatusUnknown.value = false
