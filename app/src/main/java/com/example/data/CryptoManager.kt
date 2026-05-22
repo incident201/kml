@@ -240,13 +240,15 @@ class CryptoManager(private val context: Context) {
         return lockFile.exists()
     }
 
-    fun deleteEncryptedFile() {
+    fun deleteEncryptedFile(): Boolean {
+        var success = true
         if (lockFile.exists()) {
-            lockFile.delete()
+            success = lockFile.delete() && !lockFile.exists()
         }
         val lockFileTmp = File(context.filesDir, "locked_image.enc.tmp")
         if (lockFileTmp.exists()) {
-            lockFileTmp.delete()
+            success = lockFileTmp.delete() && !lockFileTmp.exists() && success
         }
+        return success
     }
 }

@@ -37,6 +37,9 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
     val timeLeftMs by viewModel.timeLeftMs.collectAsState()
     val unlockedBitmap by viewModel.unlockedBitmap.collectAsState()
     val canCancelLock by viewModel.canCancelLock.collectAsState()
+    val isStatusUnknown by viewModel.isStatusUnknown.collectAsState()
+    val cleanupFailed by viewModel.cleanupFailed.collectAsState()
+    val isUnlockStateSaved by viewModel.isUnlockStateSaved.collectAsState()
 
     val context = LocalContext.current
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
@@ -551,6 +554,58 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         }
                     }
                     
+                    if (!isUnlockStateSaved) {
+                        Spacer(Modifier.height(16.dp))
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer
+                            ),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text(
+                                    text = "Внимание: не удалось записать статус разблокировки в защищенные настройки приложения. Экспорт по-прежнему доступен, но если вы перезапустите приложение, оно может снова показать экран блокировки таймера.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
+                        }
+                    }
+
+                    if (cleanupFailed) {
+                        Spacer(Modifier.height(16.dp))
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer
+                            ),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = "Экспорт завершён успешно, но при очистке зашифрованных локальных временных файлов локбокса произошла неизвестная системная ошибка. Пожалуйста, повторите ручную очистку локбокса прямо сейчас, чтобы полностью уничтожить защищенную ковербиту.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    textAlign = TextAlign.Center
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Button(
+                                    onClick = {
+                                        viewModel.completeAndClean()
+                                        selectedUri = null
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.error
+                                    )
+                                ) {
+                                    Text("Повторить ручную очистку локбокса")
+                                }
+                            }
+                        }
+                    }
+                    
                     Spacer(Modifier.height(32.dp))
                     
                     var isSaving by remember { mutableStateOf(false) }
@@ -637,6 +692,39 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         modifier = Modifier.fillMaxWidth().height(56.dp)
                     ) {
                         Text("Удалить оригинал")
+                    }
+
+                    if (isStatusUnknown) {
+                        Spacer(Modifier.height(16.dp))
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer
+                            ),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = "Не удалось подтвердить удаление оригинала из галереи устройства. Пожалуйста, убедитесь, что оригинал файла удален в Вашей галерее, после чего нажмите кнопку ниже, чтобы проверить его статус еще раз.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    textAlign = TextAlign.Center
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Button(
+                                    onClick = {
+                                        viewModel.checkCurrentState()
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.error
+                                    )
+                                ) {
+                                    Text("Проверить снова")
+                                }
+                            }
+                        }
                     }
 
                     if (canCancelLock) {

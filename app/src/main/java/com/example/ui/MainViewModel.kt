@@ -51,6 +51,15 @@ class MainViewModel(
     private val _canCancelLock = MutableStateFlow(false)
     val canCancelLock: StateFlow<Boolean> = _canCancelLock.asStateFlow()
 
+    private val _isStatusUnknown = MutableStateFlow(false)
+    val isStatusUnknown: StateFlow<Boolean> = _isStatusUnknown.asStateFlow()
+
+    private val _cleanupFailed = MutableStateFlow(false)
+    val cleanupFailed: StateFlow<Boolean> = _cleanupFailed.asStateFlow()
+
+    private val _isUnlockStateSaved = MutableStateFlow(true)
+    val isUnlockStateSaved: StateFlow<Boolean> = _isUnlockStateSaved.asStateFlow()
+
     private var timerJob: kotlinx.coroutines.Job? = null
 
     init {
@@ -118,9 +127,13 @@ class MainViewModel(
             val state = repository.getTransactionState()
             when (state) {
                 TransactionState.IDLE, TransactionState.CLEANED -> {
+                    _isStatusUnknown.value = false
+                    _cleanupFailed.value = false
                     _uiState.value = LockScreenState.IDLE
                 }
                 TransactionState.ENCRYPTING, TransactionState.ENCRYPTED_VERIFIED -> {
+                    _isStatusUnknown.value = false
+                    _cleanupFailed.value = false
                     // Safe cleanup - we didn't delete original yet
                     withContext(Dispatchers.IO) {
                         cryptoManager.deleteEncryptedFile()
@@ -136,31 +149,38 @@ class MainViewModel(
                         when (status) {
                             OriginalStatus.DELETED -> {
                                 _canCancelLock.value = false
+                                _isStatusUnknown.value = false
                                 transitionToLockedState()
                             }
                             OriginalStatus.EXISTS -> {
                                 _canCancelLock.value = true
+                                _isStatusUnknown.value = false
                                 _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
                             }
                             OriginalStatus.UNKNOWN -> {
                                 _canCancelLock.value = false
+                                _isStatusUnknown.value = true
                                 _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
                             }
                         }
                     } else {
+                        _isStatusUnknown.value = false
                         repository.clearLockSession()
                         _uiState.value = LockScreenState.IDLE
                     }
                 }
                 TransactionState.LOCKED -> {
+                    _isStatusUnknown.value = false
                     _uiState.value = LockScreenState.LOCKED
                     startTimer()
                 }
                 TransactionState.UNLOCKED_PENDING_EXPORT -> {
+                    _isStatusUnknown.value = false
                     _uiState.value = LockScreenState.UNLOCKED_PENDING_EXPORT
                     loadDecryptedBitmap()
                 }
                 TransactionState.RESTORED_VERIFIED -> {
+                    _isStatusUnknown.value = false
                     completeAndClean()
                 }
             }
@@ -275,6 +295,7 @@ class MainViewModel(
             when (status) {
                 OriginalStatus.DELETED -> {
                     _canCancelLock.value = false
+                    _isStatusUnknown.value = false
                     // 6. Success locking state setup
                     val durationMs = durationMinutes * 60 * 1000L
                     val endTimeUtc = currentNtpTime + durationMs
@@ -294,10 +315,12 @@ class MainViewModel(
                 }
                 OriginalStatus.EXISTS -> {
                     _canCancelLock.value = true
+                    _isStatusUnknown.value = false
                     _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
                 }
                 OriginalStatus.UNKNOWN -> {
                     _canCancelLock.value = false
+                    _isStatusUnknown.value = true
                     _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
                 }
             }
@@ -310,12 +333,16 @@ class MainViewModel(
             val originalUri = Uri.parse(originalUriStr)
             
             _uiState.value = LockScreenState.LOCKING
-            val deleted = onDeleteOriginal(originalUri)
+            // Prompt system deletion. We ignore the boolean result here because the user
+            // may accept or dismiss, but we rely entirely on checkOriginalStatus() below
+            // to safely and objectively confirm whether the original is deleted.
+            onDeleteOriginal(originalUri)
             
             val status = checkOriginalStatus(originalUri)
             when (status) {
                 OriginalStatus.DELETED -> {
                     _canCancelLock.value = false
+                    _isStatusUnknown.value = false
                     val currentNtpTime = SntpClient.getCurrentTimeUtc()
                     val durationMinutes = repository.getDurationMinutes()
                     val durationMs = durationMinutes * 60 * 1000L
@@ -342,10 +369,12 @@ class MainViewModel(
                 }
                 OriginalStatus.EXISTS -> {
                     _canCancelLock.value = true
+                    _isStatusUnknown.value = false
                     _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
                 }
                 OriginalStatus.UNKNOWN -> {
                     _canCancelLock.value = false
+                    _isStatusUnknown.value = true
                     _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
                 }
             }
@@ -411,7 +440,8 @@ class MainViewModel(
 
     private fun unlock() {
         viewModelScope.launch {
-            repository.setTransactionState(TransactionState.UNLOCKED_PENDING_EXPORT)
+            val saved = repository.setTransactionState(TransactionState.UNLOCKED_PENDING_EXPORT)
+            _isUnlockStateSaved.value = saved
             _uiState.value = LockScreenState.UNLOCKED_PENDING_EXPORT
             loadDecryptedBitmap()
         }
@@ -436,10 +466,18 @@ class MainViewModel(
 
     fun completeAndClean() {
         cleanupBitmap()
-        viewModelScope.launch(Dispatchers.IO) {
-            cryptoManager.deleteEncryptedFile()
-            repository.clearLockSession()
-            _uiState.value = LockScreenState.IDLE
+        viewModelScope.launch {
+            val fileDeleted = withContext(Dispatchers.IO) {
+                cryptoManager.deleteEncryptedFile()
+            }
+            val prefsCleared = repository.clearLockSession()
+            if (fileDeleted && prefsCleared) {
+                _cleanupFailed.value = false
+                _uiState.value = LockScreenState.IDLE
+                _isStatusUnknown.value = false
+            } else {
+                _cleanupFailed.value = true
+            }
         }
     }
 
@@ -459,6 +497,7 @@ class MainViewModel(
                         android.os.Environment.DIRECTORY_PICTURES
                     }
                     put(MediaStore.MediaColumns.RELATIVE_PATH, targetDir)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
             }
 
@@ -493,6 +532,12 @@ class MainViewModel(
                 // Verify saved URI SHA-256 and integrity
                 val verified = cryptoManager.verifySavedUriIntegrity(insertedUri, originalSha256)
                 if (verified) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val updateValues = ContentValues().apply {
+                            put(MediaStore.MediaColumns.IS_PENDING, 0)
+                        }
+                        contentResolver.update(insertedUri, updateValues, null, null)
+                    }
                     repository.setTransactionState(TransactionState.RESTORED_VERIFIED)
                     true
                 } else {
