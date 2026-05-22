@@ -1,0 +1,38 @@
+package com.example
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.Surface
+import androidx.compose.ui.Modifier
+import com.example.data.CryptoManager
+import com.example.data.LockRepository
+import com.example.ui.KeepMeLockedScreen
+import com.example.ui.MainViewModel
+import com.example.ui.MainViewModelFactory
+import com.example.ui.theme.MyApplicationTheme
+
+class MainActivity : ComponentActivity() {
+
+    private val cryptoManager by lazy { CryptoManager(applicationContext) }
+    private val repository by lazy { LockRepository(applicationContext) }
+    
+    private val viewModel: MainViewModel by viewModels {
+        MainViewModelFactory(cryptoManager, repository, applicationContext)
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent {
+            MyApplicationTheme {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    KeepMeLockedScreen(viewModel = viewModel)
+                }
+            }
+        }
+    }
+}
