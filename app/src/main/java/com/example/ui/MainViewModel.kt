@@ -158,20 +158,19 @@ class MainViewModel(
                     }
                 }
                 TransactionState.DELETE_ORIGINAL_PENDING -> {
+                    val originalSha256 = repository.getOriginalSha256() ?: ""
                     val hasRecoverable = withContext(Dispatchers.IO) {
-                        cryptoManager.recoverableEncryptedFileExists()
+                        cryptoManager.recoverableEncryptedFileIsValid(originalSha256)
                     }
                     if (!hasRecoverable) {
                         val originalUriStr = repository.getOriginalUri()
                         val originalStatus = originalUriStr?.let { checkOriginalStatus(Uri.parse(it)) }
 
                         if (originalStatus == OriginalStatus.EXISTS) {
-                            // Original exists, but encrypted copy is gone. Safe to abort and clear lock session.
-                            val prefsCleared = repository.clearLockSession()
-                            _cleanupFailed.value = !prefsCleared
-                            _uiState.value = LockScreenState.IDLE
+                            // Original exists, but encrypted copy is gone or invalid. Safe to abort and clear lock session.
+                            performLockboxFailureCleanup()
                         } else {
-                            // Original not confirmed exists, but encrypted copy is gone. Critical loss/missing error.
+                            // Original not confirmed exists, but encrypted copy is gone or invalid. Critical loss/missing error.
                             _uiState.value = LockScreenState.MISSING_FILE
                         }
                     } else {
@@ -368,11 +367,17 @@ class MainViewModel(
             val originalUriStr = repository.getOriginalUri() ?: return@launch
             val originalUri = Uri.parse(originalUriStr)
             
+            val originalSha256 = repository.getOriginalSha256() ?: ""
             val hasRecoverable = withContext(Dispatchers.IO) {
-                cryptoManager.recoverableEncryptedFileExists()
+                cryptoManager.recoverableEncryptedFileIsValid(originalSha256)
             }
             if (!hasRecoverable) {
-                performLockboxFailureCleanup()
+                val status = checkOriginalStatus(originalUri)
+                if (status == OriginalStatus.EXISTS) {
+                    performLockboxFailureCleanup()
+                } else {
+                    _uiState.value = LockScreenState.MISSING_FILE
+                }
                 return@launch
             }
 

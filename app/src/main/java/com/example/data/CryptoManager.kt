@@ -245,6 +245,10 @@ class CryptoManager(private val context: Context) {
         return lockFile.exists()
     }
 
+    fun recoverableEncryptedFileIsValid(expectedSha256: String): Boolean {
+        return verifyFileIntegrity(lockFile, expectedSha256)
+    }
+
     fun deleteEncryptedFile(): Boolean {
         var success = true
         if (lockFile.exists()) {
