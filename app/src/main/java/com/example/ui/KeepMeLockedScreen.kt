@@ -36,6 +36,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     val timeLeftMs by viewModel.timeLeftMs.collectAsState()
     val unlockedBitmap by viewModel.unlockedBitmap.collectAsState()
+    val canCancelLock by viewModel.canCancelLock.collectAsState()
 
     val context = LocalContext.current
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
@@ -426,10 +427,12 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                     try {
                                         if (isCameraMode) {
                                             viewModel.lockImage(uriToLock, durationMinutes) { _ ->
-                                                if (tempCameraFile.exists()) {
-                                                    tempCameraFile.delete()
+                                                val deleted = if (tempCameraFile.exists()) {
+                                                    tempCameraFile.delete() || !tempCameraFile.exists()
+                                                } else {
+                                                    true
                                                 }
-                                                true
+                                                deleted
                                             }
                                         } else {
                                             viewModel.lockImage(uriToLock, durationMinutes, onDeleteOriginal)
@@ -634,6 +637,52 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         modifier = Modifier.fillMaxWidth().height(56.dp)
                     ) {
                         Text("Удалить оригинал")
+                    }
+
+                    if (canCancelLock) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.cancelPendingLock()
+                                selectedUri = null
+                            },
+                            modifier = Modifier.fillMaxWidth().height(56.dp)
+                        ) {
+                            Text("Отменить блокировку (файл цел)")
+                        }
+                    }
+                }
+                LockScreenState.PERSISTENCE_ERROR -> {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        modifier = Modifier.size(72.dp),
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Text(
+                        text = "Ошибка сохранения сессии",
+                        style = MaterialTheme.typography.headlineSmall,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Оригинальный файл уже успешно удален, а защищенная копия надежно сохранена внутри зашифрованного хранилища локбокса. Сведения о таймере не удалось записать в защищенные настройки приложения. Пожалуйста, повторите попытку сохранения.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+                    Spacer(modifier = Modifier.height(32.dp))
+
+                    Button(
+                        onClick = {
+                            viewModel.retrySaveLockSessionAndTransition()
+                        },
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                    ) {
+                        Text("Повторить сохранение сессии")
                     }
                 }
             }

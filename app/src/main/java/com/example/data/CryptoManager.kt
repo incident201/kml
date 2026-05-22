@@ -27,10 +27,10 @@ class CryptoManager(private val context: Context) {
         val sha256: String
     )
 
-    private fun calculateSha256AndSize(uri: Uri): Pair<String, Long> {
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-        var size = 0L
-        try {
+    private fun calculateSha256AndSize(uri: Uri): Pair<String, Long>? {
+        return try {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            var size = 0L
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 val buffer = ByteArray(8192)
                 var read: Int
@@ -38,16 +38,18 @@ class CryptoManager(private val context: Context) {
                     digest.update(buffer, 0, read)
                     size += read
                 }
+                val sha256 = digest.digest().joinToString("") { "%02x".format(it) }
+                Pair(sha256, size)
             }
         } catch (e: Exception) {
             e.printStackTrace()
+            null
         }
-        val sha256 = digest.digest().joinToString("") { "%02x".format(it) }
-        return Pair(sha256, size)
     }
 
-    fun queryOriginalFileMeta(uri: Uri): OriginalFileMeta {
-        var displayName = "image_${System.currentTimeMillis()}.jpg"
+    fun queryOriginalFileMeta(uri: Uri): OriginalFileMeta? {
+        val defaultDisplayName = "image_${System.currentTimeMillis()}.jpg"
+        var displayName = defaultDisplayName
         var mimeType = "image/jpeg"
         
         try {
@@ -71,10 +73,12 @@ class CryptoManager(private val context: Context) {
             e.printStackTrace()
         }
         
-        val (sha256, size) = calculateSha256AndSize(uri)
+        val calc = calculateSha256AndSize(uri) ?: return null
+        val sha256 = calc.first
+        val size = calc.second
         
         // Derive mime from file extension if fallback was used and displayName is present
-        if (mimeType == "image/jpeg" && displayName != "image_${System.currentTimeMillis()}.jpg") {
+        if (mimeType == "image/jpeg" && displayName != defaultDisplayName) {
             val ext = displayName.substringAfterLast('.', "").lowercase()
             if (ext.isNotEmpty()) {
                 val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)

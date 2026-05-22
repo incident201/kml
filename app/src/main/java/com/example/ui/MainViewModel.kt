@@ -26,7 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 
 enum class LockScreenState {
-    IDLE, LOCKING, LOCKED, UNLOCKED_PENDING_EXPORT, MISSING_FILE, DELETE_ORIGINAL_PENDING
+    IDLE, LOCKING, LOCKED, UNLOCKED_PENDING_EXPORT, MISSING_FILE, DELETE_ORIGINAL_PENDING, PERSISTENCE_ERROR
 }
 
 class MainViewModel(
@@ -43,6 +43,9 @@ class MainViewModel(
 
     private val _unlockedBitmap = MutableStateFlow<Bitmap?>(null)
     val unlockedBitmap: StateFlow<Bitmap?> = _unlockedBitmap.asStateFlow()
+
+    private val _canCancelLock = MutableStateFlow(false)
+    val canCancelLock: StateFlow<Boolean> = _canCancelLock.asStateFlow()
 
     private var timerJob: kotlinx.coroutines.Job? = null
 
@@ -122,34 +125,15 @@ class MainViewModel(
                     _uiState.value = LockScreenState.IDLE
                 }
                 TransactionState.DELETE_ORIGINAL_PENDING -> {
-                    // Check if original file is still present
                     val originalUriStr = repository.getOriginalUri()
                     if (originalUriStr != null) {
                         val originalUri = Uri.parse(originalUriStr)
-                        val exists = withContext(Dispatchers.IO) {
-                            val directUri = getMediaStoreUriFromPickerUri(originalUri)
-                            try {
-                                context.contentResolver.query(
-                                    directUri,
-                                    arrayOf(MediaStore.MediaColumns._ID),
-                                    null,
-                                    null,
-                                    null
-                                )?.use { cursor ->
-                                    cursor.count > 0
-                                } ?: false
-                            } catch (e: SecurityException) {
-                                // SecurityException means we lost temporary grant, but the file STILL exists on device!
-                                true
-                            } catch (e: Exception) {
-                                false
-                            }
-                        }
-                        if (exists) {
-                            _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
-                        } else {
-                            // Original already deleted, proceed to lock!
+                        val isDeleted = isOriginalDeleted(originalUri)
+                        if (isDeleted) {
                             transitionToLockedState()
+                        } else {
+                            _canCancelLock.value = true
+                            _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
                         }
                     } else {
                         repository.clearLockSession()
@@ -184,9 +168,8 @@ class MainViewModel(
             }
             val bootTime = SystemClock.elapsedRealtime()
             
-            // First save lock session details, then put transition state to LOCKED
-            var saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs)
-            saveSuccess = saveSuccess && repository.setTransactionState(TransactionState.LOCKED)
+            val saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs) &&
+                              repository.setTransactionState(TransactionState.LOCKED)
             
             if (saveSuccess) {
                 if (currentNtpTime != null) {
@@ -195,10 +178,7 @@ class MainViewModel(
                 _uiState.value = LockScreenState.LOCKED
                 startTimer()
             } else {
-                // We shouldn't leave the screen visual flow broken without visual state, but 
-                // in general, if it fails, we fall back or showLocked anyway since original file is gone.
-                _uiState.value = LockScreenState.LOCKED
-                startTimer()
+                _uiState.value = LockScreenState.PERSISTENCE_ERROR
             }
         }
     }
@@ -210,6 +190,11 @@ class MainViewModel(
             // 1. Extract metadata
             val originalMeta = withContext(Dispatchers.IO) {
                 cryptoManager.queryOriginalFileMeta(uri)
+            }
+            if (originalMeta == null) {
+                repository.clearLockSession()
+                _uiState.value = LockScreenState.IDLE
+                return@launch
             }
             
             // 1b. Get NTP time
@@ -274,27 +259,11 @@ class MainViewModel(
             }
 
             // 5. Post-deletion hard verification!
-            val verifyDeleted = withContext(Dispatchers.IO) {
-                val directUri = getMediaStoreUriFromPickerUri(uri)
-                try {
-                    context.contentResolver.query(
-                        directUri,
-                        arrayOf(MediaStore.MediaColumns._ID),
-                        null,
-                        null,
-                        null
-                    )?.use { cursor ->
-                        cursor.count == 0
-                    } ?: true
-                } catch (e: SecurityException) {
-                    false
-                } catch (e: Exception) {
-                    true
-                }
-            }
+            val verifyDeleted = isOriginalDeleted(uri)
 
             if (!verifyDeleted) {
                 // Post-deletion check failed! The file still exists!
+                _canCancelLock.value = true
                 _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
                 return@launch
             }
@@ -310,10 +279,11 @@ class MainViewModel(
             if (saveSuccess) {
                 // Schedule Alarm
                 scheduleAlarm(endTimeUtc, currentNtpTime)
+                _uiState.value = LockScreenState.LOCKED
+                startTimer()
+            } else {
+                _uiState.value = LockScreenState.PERSISTENCE_ERROR
             }
-
-            _uiState.value = LockScreenState.LOCKED
-            startTimer()
         }
     }
 
@@ -326,26 +296,10 @@ class MainViewModel(
             val deleted = onDeleteOriginal(originalUri)
             if (deleted) {
                 // Post-deletion hard verify
-                val verifyDeleted = withContext(Dispatchers.IO) {
-                    val directUri = getMediaStoreUriFromPickerUri(originalUri)
-                    try {
-                        context.contentResolver.query(
-                            directUri,
-                            arrayOf(MediaStore.MediaColumns._ID),
-                            null,
-                            null,
-                            null
-                        )?.use { cursor ->
-                            cursor.count == 0
-                        } ?: true
-                    } catch (e: SecurityException) {
-                        false
-                    } catch (e: Exception) {
-                        true
-                    }
-                }
+                val verifyDeleted = isOriginalDeleted(originalUri)
                 
                 if (!verifyDeleted) {
+                    _canCancelLock.value = true
                     _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
                     return@launch
                 }
@@ -364,13 +318,17 @@ class MainViewModel(
                 val saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs) &&
                                   repository.setTransactionState(TransactionState.LOCKED)
                 
-                if (saveSuccess && currentNtpTime != null) {
-                    scheduleAlarm(calculatedEndTime, currentNtpTime)
+                if (saveSuccess) {
+                    if (currentNtpTime != null) {
+                        scheduleAlarm(calculatedEndTime, currentNtpTime)
+                    }
+                    _uiState.value = LockScreenState.LOCKED
+                    startTimer()
+                } else {
+                    _uiState.value = LockScreenState.PERSISTENCE_ERROR
                 }
-                
-                _uiState.value = LockScreenState.LOCKED
-                startTimer()
             } else {
+                _canCancelLock.value = true
                 _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
             }
         }
@@ -534,6 +492,39 @@ class MainViewModel(
                 }
                 false
             }
+        }
+    }
+
+    private suspend fun isOriginalDeleted(uri: Uri): Boolean {
+        return withContext(Dispatchers.IO) {
+            val directUri = getMediaStoreUriFromPickerUri(uri)
+            try {
+                context.contentResolver.query(
+                    directUri,
+                    arrayOf(MediaStore.MediaColumns._ID),
+                    null,
+                    null,
+                    null
+                )?.use { cursor ->
+                    cursor.count == 0
+                } ?: false
+            } catch (e: Exception) {
+                false
+            }
+        }
+    }
+
+    fun cancelPendingLock() {
+        viewModelScope.launch {
+            if (_uiState.value == LockScreenState.DELETE_ORIGINAL_PENDING && _canCancelLock.value) {
+                completeAndClean()
+            }
+        }
+    }
+
+    fun retrySaveLockSessionAndTransition() {
+        if (_uiState.value == LockScreenState.PERSISTENCE_ERROR) {
+            transitionToLockedState()
         }
     }
 
