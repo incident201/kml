@@ -12,6 +12,9 @@ import java.net.URL
 
 object SntpClient {
 
+    private const val MIN_ACCEPTED_TIME = 1704067200000L // 2024-01-01 00:00:00 UTC
+    private const val MAX_ACCEPTED_TIME = 4102444800000L // 2100-01-01 00:00:00 UTC
+
     private val NTP_SERVERS = listOf(
         "time.google.com",
         "time.cloudflare.com",
@@ -79,7 +82,7 @@ object SntpClient {
                 fraction = (fraction shl 8) or (buffer[offset + i].toLong() and 0xffL)
             }
             val ntpTimeMilliseconds = ((seconds - 2208988800L) * 1000) + ((fraction * 1000L) / 0x100000000L)
-            return ntpTimeMilliseconds
+            return if (ntpTimeMilliseconds in MIN_ACCEPTED_TIME..MAX_ACCEPTED_TIME) ntpTimeMilliseconds else null
         } catch (e: Exception) {
             e.printStackTrace()
             return null
@@ -98,9 +101,12 @@ object SntpClient {
             connection.readTimeout = 3000
             connection.instanceFollowRedirects = true
             
-            val dateValue = connection.getHeaderFieldDate("Date", -1L)
-            if (dateValue != -1L) {
-                return dateValue
+            val code = connection.responseCode
+            if (code in 200..399) {
+                val dateValue = connection.getHeaderFieldDate("Date", -1L)
+                if (dateValue != -1L && dateValue in MIN_ACCEPTED_TIME..MAX_ACCEPTED_TIME) {
+                    return dateValue
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()
