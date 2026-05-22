@@ -1,7 +1,13 @@
 package com.example
 
+import android.content.Context
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
+import androidx.test.core.app.ApplicationProvider
+import com.example.data.CryptoManager
+import com.example.data.LockRepository
+import com.example.ui.KeepMeLockedScreen
+import com.example.ui.MainViewModel
 import com.example.ui.theme.MyApplicationTheme
 import com.github.takahirom.roborazzi.RobolectricDeviceQualifiers
 import com.github.takahirom.roborazzi.captureRoboImage
@@ -21,7 +27,16 @@ class GreetingScreenshotTest {
 
   @Test
   fun greeting_screenshot() {
-    composeTestRule.setContent { MyApplicationTheme { Greeting("Robolectric") } }
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val cryptoManager = CryptoManager(context)
+    val lockRepository = LockRepository(context)
+    val viewModel = MainViewModel(cryptoManager, lockRepository, context)
+
+    composeTestRule.setContent { 
+      MyApplicationTheme { 
+        KeepMeLockedScreen(viewModel)
+      } 
+    }
 
     composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/greeting.png")
   }

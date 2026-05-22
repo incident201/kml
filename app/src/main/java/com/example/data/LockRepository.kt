@@ -6,6 +6,17 @@ import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
+enum class TransactionState {
+    IDLE,
+    ENCRYPTING,
+    ENCRYPTED_VERIFIED,
+    DELETE_ORIGINAL_PENDING,
+    LOCKED,
+    UNLOCKED_PENDING_EXPORT,
+    RESTORED_VERIFIED,
+    CLEANED
+}
+
 class LockRepository(private val context: Context) {
 
     private val sharedPreferences: SharedPreferences by lazy {
@@ -26,19 +37,54 @@ class LockRepository(private val context: Context) {
         }
     }
 
-    fun saveLockSession(endTimeUtc: Long, bootTimeAtLock: Long, durationMs: Long) {
-        sharedPreferences.edit()
+    fun setTransactionState(state: TransactionState): Boolean {
+        return sharedPreferences.edit().putString("transaction_state", state.name).commit()
+    }
+
+    fun getTransactionState(): TransactionState {
+        val stateStr = sharedPreferences.getString("transaction_state", TransactionState.IDLE.name)
+        return try {
+            TransactionState.valueOf(stateStr ?: TransactionState.IDLE.name)
+        } catch (e: Exception) {
+            TransactionState.IDLE
+        }
+    }
+
+    fun saveOriginalMetadata(originalUri: String, displayName: String?, mimeType: String?, originalSize: Long): Boolean {
+        return sharedPreferences.edit()
+            .putString("original_uri", originalUri)
+            .putString("original_display_name", displayName)
+            .putString("original_mime_type", mimeType)
+            .putLong("original_size", originalSize)
+            .commit()
+    }
+
+    fun getOriginalUri(): String? = sharedPreferences.getString("original_uri", null)
+    fun getOriginalDisplayName(): String? = sharedPreferences.getString("original_display_name", null)
+    fun getOriginalMimeType(): String? = sharedPreferences.getString("original_mime_type", null)
+    fun getOriginalSize(): Long = sharedPreferences.getLong("original_size", 0)
+
+    fun saveLockDuration(durationMinutes: Int): Boolean {
+        return sharedPreferences.edit()
+            .putInt("duration_minutes", durationMinutes)
+            .commit()
+    }
+
+    fun getDurationMinutes(): Int = sharedPreferences.getInt("duration_minutes", 0)
+
+    fun saveLockSession(endTimeUtc: Long, bootTimeAtLock: Long, durationMs: Long): Boolean {
+        return sharedPreferences.edit()
             .putBoolean("is_locked", true)
             .putLong("end_time_utc", endTimeUtc)
             .putLong("boot_time_at_lock", bootTimeAtLock)
             .putLong("duration_ms", durationMs)
             .putBoolean("had_reboot", false) // New lock session resets reboot flag
-            .apply()
+            .commit()
     }
 
     fun markReboot() {
         if (isLocked()) {
-            sharedPreferences.edit().putBoolean("had_reboot", true).apply()
+            sharedPreferences.edit().putBoolean("had_reboot", true).commit()
         }
     }
 
@@ -62,13 +108,19 @@ class LockRepository(private val context: Context) {
         return sharedPreferences.getLong("duration_ms", 0)
     }
 
-    fun clearLockSession() {
-        sharedPreferences.edit()
+    fun clearLockSession(): Boolean {
+        return sharedPreferences.edit()
             .remove("is_locked")
             .remove("end_time_utc")
             .remove("boot_time_at_lock")
             .remove("duration_ms")
             .remove("had_reboot")
-            .apply()
+            .remove("transaction_state")
+            .remove("original_uri")
+            .remove("original_display_name")
+            .remove("original_mime_type")
+            .remove("original_size")
+            .remove("duration_minutes")
+            .commit()
     }
 }

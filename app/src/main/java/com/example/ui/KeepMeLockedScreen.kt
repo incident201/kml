@@ -3,7 +3,6 @@ package com.example.ui
 import android.app.Activity
 import android.content.ContentUris
 import android.content.ContentValues
-import android.content.IntentSender
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -87,7 +86,6 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
         }
     }
     
-    // Separately Days, Hours, Minutes, as requested in User query (2)
     var selectedDays by remember { mutableStateOf(0) }
     var selectedHours by remember { mutableStateOf(0) }
     var selectedMinutes by remember { mutableStateOf(1) } // Default 1 minute
@@ -113,22 +111,72 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
         pendingDeleteResult = null
     }
 
+    // Convert Photo Picker URI -> MediaStore URI helper
+    fun getMediaStoreUriFromPickerUri(uri: Uri): Uri {
+        val uriString = uri.toString()
+        if (uriString.startsWith("content://media/external/")) {
+            return uri
+        }
+        
+        var mediaId: Long? = null
+        var isVideo = false
+        
+        for (segment in uri.pathSegments) {
+            if (segment.contains(":") || segment.contains("%3A")) {
+                val decoded = Uri.decode(segment)
+                val parts = decoded.split(":")
+                if (parts.size == 2) {
+                    val type = parts[0]
+                    val idVal = parts[1].toLongOrNull()
+                    if (idVal != null) {
+                        mediaId = idVal
+                        if (type.lowercase() == "video") {
+                            isVideo = true
+                        }
+                        break
+                    }
+                }
+            }
+        }
+        
+        if (mediaId == null) {
+            val lastSegment = uri.lastPathSegment
+            if (lastSegment != null) {
+                val idVal = lastSegment.toLongOrNull()
+                if (idVal != null) {
+                    mediaId = idVal
+                } else {
+                    val decoded = Uri.decode(lastSegment)
+                    if (decoded.contains(":")) {
+                        val parts = decoded.split(":")
+                        val lastPart = parts.lastOrNull()?.toLongOrNull()
+                        if (lastPart != null) {
+                            mediaId = lastPart
+                            if (parts[0].lowercase() == "video") {
+                                isVideo = true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (mediaId != null) {
+            return if (isVideo) {
+                ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mediaId)
+            } else {
+                ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, mediaId)
+            }
+        }
+        
+        return uri
+    }
+
     val onDeleteOriginal: suspend (Uri) -> Boolean = { uriToLock ->
         val deferred = CompletableDeferred<Boolean>()
         pendingDeleteResult = deferred
         
-        // Convert photopicker URI to direct MediaStore image/video URI for createDeleteRequest
-        val id = uriToLock.lastPathSegment?.toLongOrNull()
-        val directUri = if (id != null) {
-            val type = contentResolver.getType(uriToLock) ?: ""
-            if (type.startsWith("video")) {
-                ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
-            } else {
-                ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
-            }
-        } else {
-            uriToLock
-        }
+        val directUri = getMediaStoreUriFromPickerUri(uriToLock)
 
         withContext(Dispatchers.Main) {
             try {
@@ -136,14 +184,14 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                     val intentSender = MediaStore.createDeleteRequest(contentResolver, listOf(directUri)).intentSender
                     deleteLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
                 } else {
-                    contentResolver.delete(directUri, null, null)
-                    deferred.complete(true)
+                    val deletedRows = contentResolver.delete(directUri, null, null)
+                    deferred.complete(deletedRows > 0)
                 }
             } catch (t: Throwable) {
                 t.printStackTrace()
                 try {
-                    contentResolver.delete(directUri, null, null)
-                    deferred.complete(true)
+                    val deletedRows = contentResolver.delete(directUri, null, null)
+                    deferred.complete(deletedRows > 0)
                 } catch (fallbackEx: Throwable) {
                     fallbackEx.printStackTrace()
                     android.widget.Toast.makeText(context, "Без удаления оригинала функция блокировки недоступна", android.widget.Toast.LENGTH_LONG).show()
@@ -160,7 +208,6 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
         }
     }
 
-    // Set Secure flag for lock screen
     val activity = context as? Activity
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -244,7 +291,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                 val hasCameraPermission = androidx.core.content.ContextCompat.checkSelfPermission(
                                     context,
                                     android.Manifest.permission.CAMERA
-                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                               ) == android.content.pm.PackageManager.PERMISSION_GRANTED
 
                                 if (hasCameraPermission) {
                                     if (tempCameraFile.exists()) {
@@ -269,7 +316,6 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         )
                         Spacer(Modifier.height(16.dp))
 
-                        // Timer Clock Picker
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -454,7 +500,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         textAlign = TextAlign.Center
                     )
                 }
-                LockScreenState.UNLOCKED -> {
+                LockScreenState.UNLOCKED_PENDING_EXPORT -> {
                     if (unlockedBitmap != null) {
                         Image(
                             bitmap = unlockedBitmap!!.asImageBitmap(),
@@ -463,60 +509,77 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                 .fillMaxWidth()
                                 .height(300.dp)
                         )
-                        Spacer(Modifier.height(32.dp))
-                        Button(
-                            onClick = {
-                                coroutineScope.launch {
-                                    try {
-                                        val bytes = withContext(Dispatchers.IO) { viewModel.getFileBytesToSave() }
-                                        if (bytes != null) {
-                                            val savedSuccessfully = withContext(Dispatchers.IO) {
-                                                try {
-                                                    val values = ContentValues().apply {
-                                                        put(MediaStore.MediaColumns.DISPLAY_NAME, "Unlocked_${System.currentTimeMillis()}.jpg")
-                                                        put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                                            put(MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_PICTURES)
-                                                        }
-                                                    }
-                                                    val saveUri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                                                    if (saveUri != null) {
-                                                        contentResolver.openOutputStream(saveUri)?.use { it.write(bytes) }
-                                                        true
-                                                    } else {
-                                                        false
-                                                    }
-                                                } catch (e: Exception) {
-                                                    e.printStackTrace()
-                                                    false
-                                                }
-                                            }
-                                            if (savedSuccessfully) {
-                                                android.widget.Toast.makeText(context, "Сохранено в галерею", android.widget.Toast.LENGTH_SHORT).show()
-                                                viewModel.completeAndClean()
-                                                selectedUri = null
-                                            } else {
-                                                android.widget.Toast.makeText(context, "Не удалось сохранить файл", android.widget.Toast.LENGTH_LONG).show()
-                                            }
-                                        }
-                                    } catch (t: Throwable) {
-                                        t.printStackTrace()
-                                        android.widget.Toast.makeText(context, "Ошибка сохранения", android.widget.Toast.LENGTH_LONG).show()
-                                    }
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth().height(56.dp)
-                        ) {
-                            Text("Save to Gallery")
-                        }
                     } else {
-                        Text("Image could not be loaded or is corrupted.")
-                        Spacer(Modifier.height(16.dp))
-                        Button(onClick = { 
-                            viewModel.completeAndClean()
-                            selectedUri = null
-                        }) {
-                            Text("Return Home")
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(200.dp)
+                                .padding(16.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            )
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(48.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = "Предпросмотр недоступен",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = "Вы можете успешно экспортировать оригинальный файл",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                        modifier = Modifier.padding(horizontal = 8.dp),
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    
+                    Spacer(Modifier.height(32.dp))
+                    
+                    var isSaving by remember { mutableStateOf(false) }
+                    
+                    Button(
+                        onClick = {
+                            isSaving = true
+                            coroutineScope.launch {
+                                try {
+                                    val savedSuccessfully = viewModel.restoreAndExport()
+                                    if (savedSuccessfully) {
+                                        android.widget.Toast.makeText(context, "Успешно сохранено в галерею", android.widget.Toast.LENGTH_SHORT).show()
+                                        viewModel.completeAndClean()
+                                        selectedUri = null
+                                    } else {
+                                        android.widget.Toast.makeText(context, "Не удалось сохранить файл или проверка целостности не прошла", android.widget.Toast.LENGTH_LONG).show()
+                                    }
+                                } catch (t: Throwable) {
+                                    t.printStackTrace()
+                                    android.widget.Toast.makeText(context, "Ошибка сохранения", android.widget.Toast.LENGTH_LONG).show()
+                                } finally {
+                                    isSaving = false
+                                }
+                            }
+                        },
+                        enabled = !isSaving,
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                    ) {
+                        if (isSaving) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Color.White)
+                        } else {
+                            Text("Сохранить файл в галерею")
                         }
                     }
                 }
@@ -539,6 +602,50 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         selectedUri = null
                     }) {
                         Text("Reset")
+                    }
+                }
+                LockScreenState.DELETE_ORIGINAL_PENDING -> {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        modifier = Modifier.size(72.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Text(
+                        text = "Требуется удаление оригинала",
+                        style = MaterialTheme.typography.headlineSmall,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Для защиты файла необходимо удалить его оригинал с Вашего устройства. Фотография уже надежно защищена внутри локбокса.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+                    Spacer(modifier = Modifier.height(32.dp))
+
+                    Button(
+                        onClick = {
+                            viewModel.retryDeleteAndLock(onDeleteOriginal)
+                        },
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                    ) {
+                        Text("Удалить оригинал")
+                    }
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.completeAndClean()
+                            selectedUri = null
+                        },
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                    ) {
+                        Text("Сбросить сессию (файл сотрется)")
                     }
                 }
             }
@@ -705,4 +812,3 @@ fun CameraIcon(modifier: Modifier = Modifier, color: Color = androidx.compose.ma
         )
     }
 }
-
