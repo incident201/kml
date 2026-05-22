@@ -158,42 +158,75 @@ class MainViewModel(
                     }
                 }
                 TransactionState.DELETE_ORIGINAL_PENDING -> {
-                    val originalUriStr = repository.getOriginalUri()
-                    if (originalUriStr != null) {
-                        val originalUri = Uri.parse(originalUriStr)
-                        val status = checkOriginalStatus(originalUri)
-                        when (status) {
-                            OriginalStatus.DELETED -> {
-                                _canCancelLock.value = false
-                                _isStatusUnknown.value = false
-                                transitionToLockedState()
-                            }
-                            OriginalStatus.EXISTS -> {
-                                _canCancelLock.value = true
-                                _isStatusUnknown.value = false
-                                _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
-                            }
-                            OriginalStatus.UNKNOWN -> {
-                                _canCancelLock.value = false
-                                _isStatusUnknown.value = true
-                                _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
-                            }
+                    val hasEncrypted = withContext(Dispatchers.IO) {
+                        cryptoManager.encryptedArtifactsExist()
+                    }
+                    if (!hasEncrypted) {
+                        val originalUriStr = repository.getOriginalUri()
+                        val originalStatus = originalUriStr?.let { checkOriginalStatus(Uri.parse(it)) }
+
+                        if (originalStatus == OriginalStatus.EXISTS) {
+                            // Original exists, but encrypted copy is gone. Safe to abort and clear lock session.
+                            val prefsCleared = repository.clearLockSession()
+                            _cleanupFailed.value = !prefsCleared
+                            _uiState.value = LockScreenState.IDLE
+                        } else {
+                            // Original not confirmed exists, but encrypted copy is gone. Critical loss/missing error.
+                            _uiState.value = LockScreenState.MISSING_FILE
                         }
                     } else {
-                        _isStatusUnknown.value = false
-                        repository.clearLockSession()
-                        _uiState.value = LockScreenState.IDLE
+                        val originalUriStr = repository.getOriginalUri()
+                        if (originalUriStr != null) {
+                            val originalUri = Uri.parse(originalUriStr)
+                            val status = checkOriginalStatus(originalUri)
+                            when (status) {
+                                OriginalStatus.DELETED -> {
+                                    _canCancelLock.value = false
+                                    _isStatusUnknown.value = false
+                                    transitionToLockedState()
+                                }
+                                OriginalStatus.EXISTS -> {
+                                    _canCancelLock.value = true
+                                    _isStatusUnknown.value = false
+                                    _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+                                }
+                                OriginalStatus.UNKNOWN -> {
+                                    _canCancelLock.value = false
+                                    _isStatusUnknown.value = true
+                                    _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+                                }
+                            }
+                        } else {
+                            _isStatusUnknown.value = false
+                            val prefsCleared = repository.clearLockSession()
+                            _cleanupFailed.value = !prefsCleared
+                            _uiState.value = LockScreenState.IDLE
+                        }
                     }
                 }
                 TransactionState.LOCKED -> {
-                    _isStatusUnknown.value = false
-                    _uiState.value = LockScreenState.LOCKED
-                    startTimer()
+                    val hasEncrypted = withContext(Dispatchers.IO) {
+                        cryptoManager.encryptedArtifactsExist()
+                    }
+                    if (!hasEncrypted) {
+                        _uiState.value = LockScreenState.MISSING_FILE
+                    } else {
+                        _isStatusUnknown.value = false
+                        _uiState.value = LockScreenState.LOCKED
+                        startTimer()
+                    }
                 }
                 TransactionState.UNLOCKED_PENDING_EXPORT -> {
-                    _isStatusUnknown.value = false
-                    _uiState.value = LockScreenState.UNLOCKED_PENDING_EXPORT
-                    loadDecryptedBitmap()
+                    val hasEncrypted = withContext(Dispatchers.IO) {
+                        cryptoManager.encryptedArtifactsExist()
+                    }
+                    if (!hasEncrypted) {
+                        _uiState.value = LockScreenState.MISSING_FILE
+                    } else {
+                        _isStatusUnknown.value = false
+                        _uiState.value = LockScreenState.UNLOCKED_PENDING_EXPORT
+                        loadDecryptedBitmap()
+                    }
                 }
                 TransactionState.RESTORED_VERIFIED -> {
                     _isStatusUnknown.value = false
@@ -240,16 +273,14 @@ class MainViewModel(
                 cryptoManager.queryOriginalFileMeta(uri)
             }
             if (originalMeta == null) {
-                repository.clearLockSession()
-                _uiState.value = LockScreenState.IDLE
+                performLockboxFailureCleanup()
                 return@launch
             }
             
             // 1b. Get NTP time
             val currentNtpTime = SntpClient.getCurrentTimeUtc()
             if (currentNtpTime == null) {
-                repository.clearLockSession()
-                _uiState.value = LockScreenState.IDLE
+                performLockboxFailureCleanup()
                 return@launch
             }
 
@@ -265,8 +296,7 @@ class MainViewModel(
             writeSuccess = writeSuccess && repository.saveLockDuration(durationMinutes)
             
             if (!writeSuccess) {
-                repository.clearLockSession()
-                _uiState.value = LockScreenState.IDLE
+                performLockboxFailureCleanup()
                 return@launch
             }
 
@@ -340,6 +370,14 @@ class MainViewModel(
             val originalUriStr = repository.getOriginalUri() ?: return@launch
             val originalUri = Uri.parse(originalUriStr)
             
+            val hasEncrypted = withContext(Dispatchers.IO) {
+                cryptoManager.encryptedArtifactsExist()
+            }
+            if (!hasEncrypted) {
+                performLockboxFailureCleanup()
+                return@launch
+            }
+
             _uiState.value = LockScreenState.LOCKING
             // Prompt system deletion. We ignore the boolean result here because the user
             // may accept or dismiss, but we rely entirely on checkOriginalStatus() below
