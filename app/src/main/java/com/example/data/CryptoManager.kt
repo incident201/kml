@@ -92,9 +92,14 @@ class CryptoManager(private val context: Context) {
     }
 
     fun encryptAndSave(inputUri: Uri, expectedSha256: String): Boolean {
+        val lockFileTmp = File(context.filesDir, "locked_image.enc.tmp")
+        if (lockFileTmp.exists() && !lockFileTmp.delete()) {
+            return false
+        }
+
         return try {
-            if (lockFile.exists()) {
-                lockFile.delete()
+            if (lockFile.exists() && !lockFile.delete()) {
+                return false
             }
             val encryptedFile = EncryptedFile.Builder(
                 context,
