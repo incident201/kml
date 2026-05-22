@@ -536,7 +536,44 @@ class MainViewModel(
                         val updateValues = ContentValues().apply {
                             put(MediaStore.MediaColumns.IS_PENDING, 0)
                         }
-                        contentResolver.update(insertedUri, updateValues, null, null)
+                        val rowsUpdated = contentResolver.update(insertedUri, updateValues, null, null)
+                        if (rowsUpdated <= 0) {
+                            contentResolver.delete(insertedUri, null, null)
+                            return@withContext false
+                        }
+
+                        // Query verification for IS_PENDING
+                        var pendingStatusVerified = false
+                        try {
+                            contentResolver.query(
+                                insertedUri,
+                                arrayOf(MediaStore.MediaColumns.IS_PENDING),
+                                null,
+                                null,
+                                null
+                            )?.use { cursor ->
+                                if (cursor.moveToFirst()) {
+                                    val isPendingCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.IS_PENDING)
+                                    val isPendingVal = cursor.getInt(isPendingCol)
+                                    if (isPendingVal == 0) {
+                                        pendingStatusVerified = true
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                        if (!pendingStatusVerified) {
+                            contentResolver.delete(insertedUri, null, null)
+                            return@withContext false
+                        }
+
+                        // Final verify after IS_PENDING = 0 to make absolutely sure it's fully readable and perfect
+                        val finalVerified = cryptoManager.verifySavedUriIntegrity(insertedUri, originalSha256)
+                        if (!finalVerified) {
+                            contentResolver.delete(insertedUri, null, null)
+                            return@withContext false
+                        }
                     }
                     repository.setTransactionState(TransactionState.RESTORED_VERIFIED)
                     true

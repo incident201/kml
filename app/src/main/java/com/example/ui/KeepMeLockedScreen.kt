@@ -273,6 +273,39 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                     Spacer(modifier = Modifier.height(32.dp))
 
                     if (selectedUri == null) {
+                        if (cleanupFailed) {
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.errorContainer
+                                ),
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "Экспорт завершён успешно, но при очистке зашифрованных локальных временных файлов локбокса произошла неизвестная системная ошибка. Пожалуйста, повторите ручную очистку локбокса прямо сейчас, чтобы полностью уничтожить защищенную ковербиту.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        textAlign = TextAlign.Center
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Button(
+                                        onClick = {
+                                            viewModel.completeAndClean()
+                                        },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.error
+                                        )
+                                    ) {
+                                        Text("Повторить ручную очистку локбокса")
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(24.dp))
+                        }
+
                         Button(
                             onClick = {
                                 pickMedia.launch(
