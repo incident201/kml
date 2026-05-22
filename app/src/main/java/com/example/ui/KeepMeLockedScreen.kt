@@ -40,6 +40,52 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
 
     val context = LocalContext.current
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
+    var isCameraMode by remember { mutableStateOf(false) }
+
+    val tempCameraFile = remember { java.io.File(context.cacheDir, "camera_capture.jpg") }
+    val cameraUri = remember(tempCameraFile) {
+        androidx.core.content.FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            tempCameraFile
+        )
+    }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture(),
+        onResult = { success ->
+            if (success) {
+                selectedUri = Uri.fromFile(tempCameraFile)
+                isCameraMode = true
+            } else {
+                if (tempCameraFile.exists()) {
+                    tempCameraFile.delete()
+                }
+            }
+        }
+    )
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { isGranted ->
+            if (isGranted) {
+                if (tempCameraFile.exists()) {
+                    tempCameraFile.delete()
+                }
+                cameraLauncher.launch(cameraUri)
+            } else {
+                android.widget.Toast.makeText(context, "Разрешение на камеру отклонено", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    )
+
+    DisposableEffect(Unit) {
+        onDispose {
+            if (tempCameraFile.exists()) {
+                tempCameraFile.delete()
+            }
+        }
+    }
     
     // Separately Days, Hours, Minutes, as requested in User query (2)
     var selectedDays by remember { mutableStateOf(0) }
@@ -188,7 +234,32 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         ) {
                             Icon(Icons.Default.Add, contentDescription = null)
                             Spacer(Modifier.width(8.dp))
-                            Text("Select Image")
+                            Text("Выбрать из галереи")
+                        }
+                        
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        OutlinedButton(
+                            onClick = {
+                                val hasCameraPermission = androidx.core.content.ContextCompat.checkSelfPermission(
+                                    context,
+                                    android.Manifest.permission.CAMERA
+                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+                                if (hasCameraPermission) {
+                                    if (tempCameraFile.exists()) {
+                                        tempCameraFile.delete()
+                                    }
+                                    cameraLauncher.launch(cameraUri)
+                                } else {
+                                    cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth().height(56.dp)
+                        ) {
+                            CameraIcon()
+                            Spacer(Modifier.width(8.dp))
+                            Text("Сделать снимок")
                         }
                     } else {
                         Text(
@@ -307,9 +378,22 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                 coroutineScope.launch {
                                     val uriToLock = selectedUri!!
                                     try {
-                                        viewModel.lockImage(uriToLock, durationMinutes, onDeleteOriginal)
+                                        if (isCameraMode) {
+                                            viewModel.lockImage(uriToLock, durationMinutes) { _ ->
+                                                if (tempCameraFile.exists()) {
+                                                    tempCameraFile.delete()
+                                                }
+                                                true
+                                            }
+                                        } else {
+                                            viewModel.lockImage(uriToLock, durationMinutes, onDeleteOriginal)
+                                        }
+                                        isCameraMode = false
                                     } catch (t: Throwable) {
                                         android.widget.Toast.makeText(context, "Ошибка при подготовке блокировки", android.widget.Toast.LENGTH_LONG).show()
+                                        if (tempCameraFile.exists()) {
+                                            tempCameraFile.delete()
+                                        }
                                         viewModel.completeAndClean()
                                     } finally {
                                         isDeleteInProgress = false
@@ -321,11 +405,19 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         ) {
                             Icon(Icons.Default.Lock, contentDescription = null)
                             Spacer(Modifier.width(8.dp))
-                            Text("Lock Now")
+                            Text("Заблокировать")
                         }
                         Spacer(Modifier.height(16.dp))
-                        OutlinedButton(onClick = { selectedUri = null }) {
-                            Text("Cancel")
+                        OutlinedButton(
+                            onClick = {
+                                selectedUri = null
+                                if (tempCameraFile.exists()) {
+                                    tempCameraFile.delete()
+                                }
+                                isCameraMode = false
+                            }
+                        ) {
+                            Text("Отмена")
                         }
                     }
                 }
@@ -551,3 +643,66 @@ fun ArrowDownIcon(modifier: Modifier = Modifier, color: Color = MaterialTheme.co
         )
     }
 }
+
+@Composable
+fun CameraIcon(modifier: Modifier = Modifier, color: Color = androidx.compose.material3.LocalContentColor.current) {
+    androidx.compose.foundation.Canvas(modifier = modifier.size(24.dp)) {
+        val bodyWidth = size.width * 0.8f
+        val bodyHeight = size.height * 0.55f
+        val bodyLeft = (size.width - bodyWidth) / 2f
+        val bodyTop = (size.height - bodyHeight) / 2f + 2.dp.toPx()
+        
+        val cornerRadius = 3.dp.toPx()
+        
+        val lensRadius = size.width * 0.18f
+        val lensCenterX = size.width / 2f
+        val lensCenterY = bodyTop + bodyHeight / 2f
+        
+        val flashRadius = 2.dp.toPx()
+        val flashCenterX = bodyLeft + bodyWidth - 6.dp.toPx()
+        val flashCenterY = bodyTop + 6.dp.toPx()
+
+        val mountWidth = size.width * 0.25f
+        val mountHeight = 4.dp.toPx()
+        val mountLeft = (size.width - mountWidth) / 2f
+        val mountTop = bodyTop - mountHeight + 1.dp.toPx()
+
+        drawRoundRect(
+            color = color,
+            topLeft = androidx.compose.ui.geometry.Offset(mountLeft, mountTop),
+            size = androidx.compose.ui.geometry.Size(mountWidth, mountHeight),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx(), 2.dp.toPx()),
+            style = androidx.compose.ui.graphics.drawscope.Fill
+        )
+
+        drawRoundRect(
+            color = color,
+            topLeft = androidx.compose.ui.geometry.Offset(bodyLeft, bodyTop),
+            size = androidx.compose.ui.geometry.Size(bodyWidth, bodyHeight),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerRadius, cornerRadius),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
+        )
+
+        drawCircle(
+            color = color,
+            radius = lensRadius,
+            center = androidx.compose.ui.geometry.Offset(lensCenterX, lensCenterY),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
+        )
+
+        drawCircle(
+            color = color,
+            radius = lensRadius * 0.4f,
+            center = androidx.compose.ui.geometry.Offset(lensCenterX, lensCenterY),
+            style = androidx.compose.ui.graphics.drawscope.Fill
+        )
+
+        drawCircle(
+            color = color,
+            radius = flashRadius,
+            center = androidx.compose.ui.geometry.Offset(flashCenterX, flashCenterY),
+            style = androidx.compose.ui.graphics.drawscope.Fill
+        )
+    }
+}
+
