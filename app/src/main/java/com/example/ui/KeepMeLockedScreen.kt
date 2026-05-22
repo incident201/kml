@@ -1,6 +1,7 @@
 package com.example.ui
 
 import android.app.Activity
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.IntentSender
 import android.net.Uri
@@ -19,10 +20,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -36,30 +40,72 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
 
     val context = LocalContext.current
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
-    var durationMinutes by remember { mutableStateOf(1) } // Default 1 minute
+    
+    // Separately Days, Hours, Minutes, as requested in User query (2)
+    var selectedDays by remember { mutableStateOf(0) }
+    var selectedHours by remember { mutableStateOf(0) }
+    var selectedMinutes by remember { mutableStateOf(1) } // Default 1 minute
+    
+    val durationMinutes = remember(selectedDays, selectedHours, selectedMinutes) {
+        (selectedDays * 24 * 60) + (selectedHours * 60) + selectedMinutes
+    }
+
     val coroutineScope = rememberCoroutineScope()
 
-    var pendingDeleteUri by remember { mutableStateOf<Uri?>(null) }
     var isDeleteInProgress by remember { mutableStateOf(false) }
+    var pendingDeleteResult by remember { mutableStateOf<CompletableDeferred<Boolean>?>(null) }
 
     val contentResolver = context.contentResolver
 
     val deleteLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK && pendingDeleteUri != null) {
-            coroutineScope.launch {
-                viewModel.lockImage(pendingDeleteUri!!, durationMinutes) { true }
-                pendingDeleteUri = null
-                isDeleteInProgress = false
+        if (result.resultCode == Activity.RESULT_OK) {
+            pendingDeleteResult?.complete(true)
+        } else {
+            android.widget.Toast.makeText(context, "Без удаления оригинала функция блокировки недоступна", android.widget.Toast.LENGTH_LONG).show()
+            pendingDeleteResult?.complete(false)
+        }
+        pendingDeleteResult = null
+    }
+
+    val onDeleteOriginal: suspend (Uri) -> Boolean = { uriToLock ->
+        val deferred = CompletableDeferred<Boolean>()
+        pendingDeleteResult = deferred
+        
+        // Convert photopicker URI to direct MediaStore image/video URI for createDeleteRequest
+        val id = uriToLock.lastPathSegment?.toLongOrNull()
+        val directUri = if (id != null) {
+            val type = contentResolver.getType(uriToLock) ?: ""
+            if (type.startsWith("video")) {
+                ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
+            } else {
+                ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
             }
         } else {
-            // Delete failed or cancelled
-            android.widget.Toast.makeText(context, "Без удаления оригинала функция блокировки недоступна", android.widget.Toast.LENGTH_LONG).show()
-            coroutineScope.launch {
-                viewModel.completeAndClean()
-            }
-            pendingDeleteUri = null
-            isDeleteInProgress = false
+            uriToLock
         }
+
+        withContext(Dispatchers.Main) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val intentSender = MediaStore.createDeleteRequest(contentResolver, listOf(directUri)).intentSender
+                    deleteLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
+                } else {
+                    contentResolver.delete(directUri, null, null)
+                    deferred.complete(true)
+                }
+            } catch (t: Throwable) {
+                t.printStackTrace()
+                try {
+                    contentResolver.delete(directUri, null, null)
+                    deferred.complete(true)
+                } catch (fallbackEx: Throwable) {
+                    fallbackEx.printStackTrace()
+                    android.widget.Toast.makeText(context, "Без удаления оригинала функция блокировки недоступна", android.widget.Toast.LENGTH_LONG).show()
+                    deferred.complete(false)
+                }
+            }
+        }
+        deferred.await()
     }
 
     val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -145,59 +191,132 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                             Text("Select Image")
                         }
                     } else {
-                        Text("Ready to lock image.")
-                        Spacer(Modifier.height(16.dp))
-                        Text("Duration: $durationMinutes minutes")
-                        Slider(
-                            value = durationMinutes.toFloat(),
-                            onValueChange = { durationMinutes = it.toInt() },
-                            valueRange = 1f..1440f, // up to 24 hours
-                            steps = 100
+                        Text(
+                            text = "Выберите время блокировки",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.primary
                         )
-                        Spacer(Modifier.height(32.dp))
+                        Spacer(Modifier.height(16.dp))
+
+                        // Timer Clock Picker
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                            ),
+                            shape = MaterialTheme.shapes.large,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    TimerUnitPicker(
+                                        label = "Дни",
+                                        value = selectedDays,
+                                        onIncrement = { if (selectedDays < 30) selectedDays++ },
+                                        onDecrement = { 
+                                            if (selectedDays > 0) {
+                                                selectedDays--
+                                                if (selectedDays == 0 && selectedHours == 0 && selectedMinutes == 0) {
+                                                    selectedMinutes = 1
+                                                }
+                                            }
+                                        }
+                                    )
+                                    
+                                    Text(
+                                        text = ":",
+                                        style = MaterialTheme.typography.displayMedium.copy(
+                                            fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                        modifier = Modifier.padding(horizontal = 4.dp).padding(bottom = 24.dp)
+                                    )
+                                    
+                                    TimerUnitPicker(
+                                        label = "Часы",
+                                        value = selectedHours,
+                                        onIncrement = { if (selectedHours < 23) selectedHours++ else selectedHours = 0 },
+                                        onDecrement = { 
+                                            if (selectedHours > 0) {
+                                                selectedHours--
+                                            } else {
+                                                selectedHours = 23
+                                            }
+                                            if (selectedDays == 0 && selectedHours == 0 && selectedMinutes == 0) {
+                                                selectedMinutes = 1
+                                            }
+                                        }
+                                    )
+                                    
+                                    Text(
+                                        text = ":",
+                                        style = MaterialTheme.typography.displayMedium.copy(
+                                            fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                        modifier = Modifier.padding(horizontal = 4.dp).padding(bottom = 24.dp)
+                                    )
+                                    
+                                    TimerUnitPicker(
+                                        label = "Минуты",
+                                        value = selectedMinutes,
+                                        onIncrement = { if (selectedMinutes < 59) selectedMinutes++ else selectedMinutes = 0 },
+                                        onDecrement = { 
+                                            if (selectedMinutes > 0) {
+                                                selectedMinutes--
+                                            } else {
+                                                selectedMinutes = 59
+                                            }
+                                            if (selectedDays == 0 && selectedHours == 0 && selectedMinutes == 0) {
+                                                selectedMinutes = 1
+                                            }
+                                        }
+                                    )
+                                }
+                                
+                                Spacer(Modifier.height(8.dp))
+                                
+                                val summaryText = buildString {
+                                    if (selectedDays > 0) append("$selectedDays дн. ")
+                                    if (selectedHours > 0 || selectedDays > 0) append("$selectedHours ч. ")
+                                    append("$selectedMinutes мин.")
+                                }
+                                Text(
+                                    text = "Итого: $summaryText ($durationMinutes мин.)",
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
+                                    ),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.height(16.dp))
                         Button(
                             onClick = {
                                 isDeleteInProgress = true
                                 coroutineScope.launch {
                                     val uriToLock = selectedUri!!
                                     try {
-                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                            try {
-                                                val intentSender = MediaStore.createDeleteRequest(contentResolver, listOf(uriToLock)).intentSender
-                                                pendingDeleteUri = uriToLock
-                                                deleteLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
-                                            } catch (t: Throwable) {
-                                                // If createDeleteRequest or launch fails due to photo picker uri limitations,
-                                                // fallback to trying contentResolver delete, or show alert.
-                                                try {
-                                                    contentResolver.delete(uriToLock, null, null)
-                                                    viewModel.lockImage(uriToLock, durationMinutes) { true }
-                                                    isDeleteInProgress = false
-                                                } catch (fallbackEx: Throwable) {
-                                                    android.widget.Toast.makeText(context, "Без удаления оригинала функция блокировки недоступна", android.widget.Toast.LENGTH_LONG).show()
-                                                    viewModel.completeAndClean()
-                                                    isDeleteInProgress = false
-                                                }
-                                            }
-                                        } else {
-                                            try {
-                                                contentResolver.delete(uriToLock, null, null)
-                                                viewModel.lockImage(uriToLock, durationMinutes) { true }
-                                                isDeleteInProgress = false
-                                            } catch (t: Throwable) {
-                                                android.widget.Toast.makeText(context, "Без удаления оригинала функция блокировки недоступна", android.widget.Toast.LENGTH_LONG).show()
-                                                viewModel.completeAndClean()
-                                                isDeleteInProgress = false
-                                            }
-                                        }
+                                        viewModel.lockImage(uriToLock, durationMinutes, onDeleteOriginal)
                                     } catch (t: Throwable) {
                                         android.widget.Toast.makeText(context, "Ошибка при подготовке блокировки", android.widget.Toast.LENGTH_LONG).show()
                                         viewModel.completeAndClean()
+                                    } finally {
                                         isDeleteInProgress = false
                                     }
                                 }
                             },
-                            enabled = !isDeleteInProgress,
+                            enabled = !isDeleteInProgress && durationMinutes > 0,
                             modifier = Modifier.fillMaxWidth().height(56.dp)
                         ) {
                             Icon(Icons.Default.Lock, contentDescription = null)
@@ -222,11 +341,18 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         color = MaterialTheme.colorScheme.error
                     )
                     Spacer(Modifier.height(32.dp))
-                    val hours = timeLeftMs / (1000 * 60 * 60)
+                    val days = timeLeftMs / (1000 * 60 * 60 * 24)
+                    val hours = (timeLeftMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60)
                     val minutes = (timeLeftMs % (1000 * 60 * 60)) / (1000 * 60)
                     val seconds = (timeLeftMs % (1000 * 60)) / 1000
+                    
+                    val timeString = if (days > 0) {
+                        String.format("%d дн. %02d:%02d:%02d", days, hours, minutes, seconds)
+                    } else {
+                        String.format("%02d:%02d:%02d", hours, minutes, seconds)
+                    }
                     Text(
-                        text = String.format("%02d:%02d:%02d", hours, minutes, seconds),
+                        text = timeString,
                         style = MaterialTheme.typography.displayMedium
                     )
                     Spacer(Modifier.height(32.dp))
@@ -325,5 +451,103 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                 }
             }
         }
+    }
+}
+
+@Composable
+fun TimerUnitPicker(
+    label: String,
+    value: Int,
+    onIncrement: () -> Unit,
+    onDecrement: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier.padding(horizontal = 4.dp)
+    ) {
+        IconButton(
+            onClick = onIncrement,
+            modifier = Modifier.size(48.dp)
+        ) {
+            ArrowUpIcon()
+        }
+        
+        Surface(
+            modifier = Modifier
+                .width(64.dp)
+                .height(64.dp),
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            tonalElevation = 2.dp,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = String.format("%02d", value),
+                    style = MaterialTheme.typography.titleLarge.copy(
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        
+        IconButton(
+            onClick = onDecrement,
+            modifier = Modifier.size(48.dp)
+        ) {
+            ArrowDownIcon()
+        }
+        
+        Spacer(Modifier.height(4.dp))
+        
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall.copy(
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+            ),
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
+    }
+}
+
+@Composable
+fun ArrowUpIcon(modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.primary) {
+    androidx.compose.foundation.Canvas(modifier = modifier.size(24.dp)) {
+        val path = androidx.compose.ui.graphics.Path().apply {
+            moveTo(size.width * 0.25f, size.height * 0.65f)
+            lineTo(size.width * 0.5f, size.height * 0.35f)
+            lineTo(size.width * 0.75f, size.height * 0.65f)
+        }
+        drawPath(
+            path = path,
+            color = color,
+            style = Stroke(
+                width = 3.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                join = androidx.compose.ui.graphics.StrokeJoin.Round
+            )
+        )
+    }
+}
+
+@Composable
+fun ArrowDownIcon(modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.primary) {
+    androidx.compose.foundation.Canvas(modifier = modifier.size(24.dp)) {
+        val path = androidx.compose.ui.graphics.Path().apply {
+            moveTo(size.width * 0.25f, size.height * 0.35f)
+            lineTo(size.width * 0.5f, size.height * 0.65f)
+            lineTo(size.width * 0.75f, size.height * 0.35f)
+        }
+        drawPath(
+            path = path,
+            color = color,
+            style = Stroke(
+                width = 3.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                join = androidx.compose.ui.graphics.StrokeJoin.Round
+            )
+        )
     }
 }
