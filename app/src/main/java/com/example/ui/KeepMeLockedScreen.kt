@@ -635,18 +635,6 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                     ) {
                         Text("Удалить оригинал")
                     }
-                    
-                    Spacer(modifier = Modifier.height(16.dp))
-                    
-                    OutlinedButton(
-                        onClick = {
-                            viewModel.completeAndClean()
-                            selectedUri = null
-                        },
-                        modifier = Modifier.fillMaxWidth().height(56.dp)
-                    ) {
-                        Text("Сбросить сессию (файл сотрется)")
-                    }
                 }
             }
         }

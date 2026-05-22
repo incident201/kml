@@ -50,6 +50,62 @@ class MainViewModel(
         checkCurrentState()
     }
 
+    private fun getMediaStoreUriFromPickerUri(uri: Uri): Uri {
+        val uriString = uri.toString()
+        if (uriString.startsWith("content://media/external/")) {
+            return uri
+        }
+        var mediaId: Long? = null
+        var isVideo = false
+        for (segment in uri.pathSegments) {
+            if (segment.contains(":") || segment.contains("%3A")) {
+                val decoded = Uri.decode(segment)
+                val parts = decoded.split(":")
+                if (parts.size == 2) {
+                    val type = parts[0]
+                    val idVal = parts[1].toLongOrNull()
+                    if (idVal != null) {
+                        mediaId = idVal
+                        if (type.lowercase() == "video") {
+                            isVideo = true
+                        }
+                        break
+                    }
+                }
+            }
+        }
+        if (mediaId == null) {
+            val lastSegment = uri.lastPathSegment
+            if (lastSegment != null) {
+                val idVal = lastSegment.toLongOrNull()
+                if (idVal != null) {
+                    mediaId = idVal
+                } else {
+                    val decoded = Uri.decode(lastSegment)
+                    if (decoded.contains(":")) {
+                        val parts = decoded.split(":")
+                        val lastPart = parts.lastOrNull()?.toLongOrNull()
+                        if (lastPart != null) {
+                            mediaId = lastPart
+                            if (parts[0].lowercase() == "video") {
+                                isVideo = true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return if (mediaId != null) {
+            if (isVideo) {
+                android.content.ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mediaId)
+            } else {
+                android.content.ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, mediaId)
+            }
+        } else {
+            uri
+        }
+    }
+
     fun checkCurrentState() {
         viewModelScope.launch {
             val state = repository.getTransactionState()
@@ -71,8 +127,20 @@ class MainViewModel(
                     if (originalUriStr != null) {
                         val originalUri = Uri.parse(originalUriStr)
                         val exists = withContext(Dispatchers.IO) {
+                            val directUri = getMediaStoreUriFromPickerUri(originalUri)
                             try {
-                                context.contentResolver.openInputStream(originalUri)?.use { true } ?: false
+                                context.contentResolver.query(
+                                    directUri,
+                                    arrayOf(MediaStore.MediaColumns._ID),
+                                    null,
+                                    null,
+                                    null
+                                )?.use { cursor ->
+                                    cursor.count > 0
+                                } ?: false
+                            } catch (e: SecurityException) {
+                                // SecurityException means we lost temporary grant, but the file STILL exists on device!
+                                true
                             } catch (e: Exception) {
                                 false
                             }
@@ -106,22 +174,32 @@ class MainViewModel(
     private fun transitionToLockedState() {
         val durationMinutes = repository.getDurationMinutes()
         val durationMs = durationMinutes * 60 * 1000L
-        repository.setTransactionState(TransactionState.LOCKED)
         
         viewModelScope.launch {
             val currentNtpTime = SntpClient.getCurrentTimeUtc()
-            if (currentNtpTime != null) {
-                val endTimeUtc = currentNtpTime + durationMs
-                val bootTime = SystemClock.elapsedRealtime()
-                repository.saveLockSession(endTimeUtc, bootTime, durationMs)
-                scheduleAlarm(endTimeUtc, currentNtpTime)
+            val calculatedEndTime = if (currentNtpTime != null) {
+                currentNtpTime + durationMs
             } else {
-                val endTimeUtc = System.currentTimeMillis() + durationMs
-                val bootTime = SystemClock.elapsedRealtime()
-                repository.saveLockSession(endTimeUtc, bootTime, durationMs)
+                System.currentTimeMillis() + durationMs
             }
-            _uiState.value = LockScreenState.LOCKED
-            startTimer()
+            val bootTime = SystemClock.elapsedRealtime()
+            
+            // First save lock session details, then put transition state to LOCKED
+            var saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs)
+            saveSuccess = saveSuccess && repository.setTransactionState(TransactionState.LOCKED)
+            
+            if (saveSuccess) {
+                if (currentNtpTime != null) {
+                    scheduleAlarm(calculatedEndTime, currentNtpTime)
+                }
+                _uiState.value = LockScreenState.LOCKED
+                startTimer()
+            } else {
+                // We shouldn't leave the screen visual flow broken without visual state, but 
+                // in general, if it fails, we fall back or showLocked anyway since original file is gone.
+                _uiState.value = LockScreenState.LOCKED
+                startTimer()
+            }
         }
     }
 
@@ -129,20 +207,11 @@ class MainViewModel(
         viewModelScope.launch {
             _uiState.value = LockScreenState.LOCKING
             
-            // 1. Extract metadata & set state to ENCRYPTING
+            // 1. Extract metadata
             val originalMeta = withContext(Dispatchers.IO) {
                 cryptoManager.queryOriginalFileMeta(uri)
             }
             
-            repository.setTransactionState(TransactionState.ENCRYPTING)
-            repository.saveOriginalMetadata(
-                originalUri = uri.toString(),
-                displayName = originalMeta.displayName,
-                mimeType = originalMeta.mimeType,
-                originalSize = originalMeta.size
-            )
-            repository.saveLockDuration(durationMinutes)
-
             // 1b. Get NTP time
             val currentNtpTime = SntpClient.getCurrentTimeUtc()
             if (currentNtpTime == null) {
@@ -151,38 +220,97 @@ class MainViewModel(
                 return@launch
             }
 
-            // 2. Encrypt & Save with instant stream-based integrity check
-            val success = withContext(Dispatchers.IO) { 
-                cryptoManager.encryptAndSave(uri, originalMeta.size) 
-            }
-            if (!success) {
+            // Write state, metadata & duration safely
+            var writeSuccess = repository.setTransactionState(TransactionState.ENCRYPTING)
+            writeSuccess = writeSuccess && repository.saveOriginalMetadata(
+                originalUri = uri.toString(),
+                displayName = originalMeta.displayName,
+                mimeType = originalMeta.mimeType,
+                originalSize = originalMeta.size
+            )
+            writeSuccess = writeSuccess && repository.saveOriginalSha256(originalMeta.sha256)
+            writeSuccess = writeSuccess && repository.saveLockDuration(durationMinutes)
+            
+            if (!writeSuccess) {
                 repository.clearLockSession()
                 _uiState.value = LockScreenState.IDLE
                 return@launch
             }
 
-            // 3. Document verified encrypted state
-            repository.setTransactionState(TransactionState.ENCRYPTED_VERIFIED)
-
-            // 4. Deletion flow transition
-            repository.setTransactionState(TransactionState.DELETE_ORIGINAL_PENDING)
-            val deleted = onDeleteOriginal(uri)
-            if (!deleted) {
+            // 2. Encrypt & Save using SHA-256 integrity
+            val encryptSuccess = withContext(Dispatchers.IO) { 
+                cryptoManager.encryptAndSave(uri, originalMeta.sha256) 
+            }
+            if (!encryptSuccess) {
                 withContext(Dispatchers.IO) { cryptoManager.deleteEncryptedFile() }
                 repository.clearLockSession()
                 _uiState.value = LockScreenState.IDLE
                 return@launch
             }
 
-            // 5. Success locking state
+            // 3. Document verified encrypted state
+            if (!repository.setTransactionState(TransactionState.ENCRYPTED_VERIFIED)) {
+                withContext(Dispatchers.IO) { cryptoManager.deleteEncryptedFile() }
+                repository.clearLockSession()
+                _uiState.value = LockScreenState.IDLE
+                return@launch
+            }
+
+            // 4. Deletion flow transition
+            if (!repository.setTransactionState(TransactionState.DELETE_ORIGINAL_PENDING)) {
+                withContext(Dispatchers.IO) { cryptoManager.deleteEncryptedFile() }
+                repository.clearLockSession()
+                _uiState.value = LockScreenState.IDLE
+                return@launch
+            }
+            
+            val deleted = onDeleteOriginal(uri)
+            if (!deleted) {
+                // Deletion dialog rejected or failed
+                withContext(Dispatchers.IO) { cryptoManager.deleteEncryptedFile() }
+                repository.clearLockSession()
+                _uiState.value = LockScreenState.IDLE
+                return@launch
+            }
+
+            // 5. Post-deletion hard verification!
+            val verifyDeleted = withContext(Dispatchers.IO) {
+                val directUri = getMediaStoreUriFromPickerUri(uri)
+                try {
+                    context.contentResolver.query(
+                        directUri,
+                        arrayOf(MediaStore.MediaColumns._ID),
+                        null,
+                        null,
+                        null
+                    )?.use { cursor ->
+                        cursor.count == 0
+                    } ?: true
+                } catch (e: SecurityException) {
+                    false
+                } catch (e: Exception) {
+                    true
+                }
+            }
+
+            if (!verifyDeleted) {
+                // Post-deletion check failed! The file still exists!
+                _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+                return@launch
+            }
+
+            // 6. Success locking state setup
             val durationMs = durationMinutes * 60 * 1000L
             val endTimeUtc = currentNtpTime + durationMs
             val bootTime = SystemClock.elapsedRealtime()
-            repository.saveLockSession(endTimeUtc, bootTime, durationMs)
-            repository.setTransactionState(TransactionState.LOCKED)
-
-            // 6. Schedule Alarm
-            scheduleAlarm(endTimeUtc, currentNtpTime)
+            
+            val saveSuccess = repository.saveLockSession(endTimeUtc, bootTime, durationMs) &&
+                              repository.setTransactionState(TransactionState.LOCKED)
+            
+            if (saveSuccess) {
+                // Schedule Alarm
+                scheduleAlarm(endTimeUtc, currentNtpTime)
+            }
 
             _uiState.value = LockScreenState.LOCKED
             startTimer()
@@ -197,20 +325,49 @@ class MainViewModel(
             _uiState.value = LockScreenState.LOCKING
             val deleted = onDeleteOriginal(originalUri)
             if (deleted) {
+                // Post-deletion hard verify
+                val verifyDeleted = withContext(Dispatchers.IO) {
+                    val directUri = getMediaStoreUriFromPickerUri(originalUri)
+                    try {
+                        context.contentResolver.query(
+                            directUri,
+                            arrayOf(MediaStore.MediaColumns._ID),
+                            null,
+                            null,
+                            null
+                        )?.use { cursor ->
+                            cursor.count == 0
+                        } ?: true
+                    } catch (e: SecurityException) {
+                        false
+                    } catch (e: Exception) {
+                        true
+                    }
+                }
+                
+                if (!verifyDeleted) {
+                    _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+                    return@launch
+                }
+
                 val currentNtpTime = SntpClient.getCurrentTimeUtc()
                 val durationMinutes = repository.getDurationMinutes()
                 val durationMs = durationMinutes * 60 * 1000L
                 val bootTime = SystemClock.elapsedRealtime()
                 
-                if (currentNtpTime != null) {
-                    val endTimeUtc = currentNtpTime + durationMs
-                    repository.saveLockSession(endTimeUtc, bootTime, durationMs)
-                    scheduleAlarm(endTimeUtc, currentNtpTime)
+                val calculatedEndTime = if (currentNtpTime != null) {
+                    currentNtpTime + durationMs
                 } else {
-                    val endTimeUtc = System.currentTimeMillis() + durationMs
-                    repository.saveLockSession(endTimeUtc, bootTime, durationMs)
+                    System.currentTimeMillis() + durationMs
                 }
-                repository.setTransactionState(TransactionState.LOCKED)
+                
+                val saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs) &&
+                                  repository.setTransactionState(TransactionState.LOCKED)
+                
+                if (saveSuccess && currentNtpTime != null) {
+                    scheduleAlarm(calculatedEndTime, currentNtpTime)
+                }
+                
                 _uiState.value = LockScreenState.LOCKED
                 startTimer()
             } else {
@@ -312,7 +469,7 @@ class MainViewModel(
 
     suspend fun restoreAndExport(): Boolean {
         return withContext(Dispatchers.IO) {
-            val originalSize = repository.getOriginalSize()
+            val originalSha256 = repository.getOriginalSha256() ?: ""
             val displayName = repository.getOriginalDisplayName() ?: "restored_image_${System.currentTimeMillis()}.jpg"
             val mimeType = repository.getOriginalMimeType() ?: "image/jpeg"
             
@@ -357,11 +514,11 @@ class MainViewModel(
                     return@withContext false
                 }
 
-                // Verify saved URI size and integrity
-                val verified = cryptoManager.verifySavedUriIntegrity(insertedUri, originalSize)
+                // Verify saved URI SHA-256 and integrity
+                val verified = cryptoManager.verifySavedUriIntegrity(insertedUri, originalSha256)
                 if (verified) {
-                    repository.setTransactionState(TransactionState.RESTORED_VERIFIED)
-                    true
+                    val stateWritten = repository.setTransactionState(TransactionState.RESTORED_VERIFIED)
+                    stateWritten
                 } else {
                     contentResolver.delete(insertedUri, null, null)
                     false

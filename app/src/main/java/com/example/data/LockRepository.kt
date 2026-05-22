@@ -20,21 +20,16 @@ enum class TransactionState {
 class LockRepository(private val context: Context) {
 
     private val sharedPreferences: SharedPreferences by lazy {
-        try {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            EncryptedSharedPreferences.create(
-                context,
-                "lock_prefs",
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-        } catch (e: Exception) {
-            Log.e("LockRepository", "Failed to use EncryptedSharedPreferences", e)
-            context.getSharedPreferences("lock_prefs_fallback", Context.MODE_PRIVATE)
-        }
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        EncryptedSharedPreferences.create(
+            context,
+            "lock_prefs",
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
     }
 
     fun setTransactionState(state: TransactionState): Boolean {
@@ -58,6 +53,12 @@ class LockRepository(private val context: Context) {
             .putLong("original_size", originalSize)
             .commit()
     }
+
+    fun saveOriginalSha256(sha256: String): Boolean {
+        return sharedPreferences.edit().putString("original_sha256", sha256).commit()
+    }
+
+    fun getOriginalSha256(): String? = sharedPreferences.getString("original_sha256", null)
 
     fun getOriginalUri(): String? = sharedPreferences.getString("original_uri", null)
     fun getOriginalDisplayName(): String? = sharedPreferences.getString("original_display_name", null)
@@ -120,6 +121,7 @@ class LockRepository(private val context: Context) {
             .remove("original_display_name")
             .remove("original_mime_type")
             .remove("original_size")
+            .remove("original_sha256")
             .remove("duration_minutes")
             .commit()
     }
