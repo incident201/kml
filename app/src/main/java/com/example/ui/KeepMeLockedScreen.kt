@@ -42,8 +42,8 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
     val isUnlockStateSaved by viewModel.isUnlockStateSaved.collectAsState()
 
     val context = LocalContext.current
-    var selectedUri by remember { mutableStateOf<Uri?>(null) }
-    var isCameraMode by remember { mutableStateOf(false) }
+    var selectedUriStr by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedUri = remember(selectedUriStr) { selectedUriStr?.let { Uri.parse(it) } }
 
     val tempCameraFile = remember { java.io.File(context.cacheDir, "camera_capture.jpg") }
     val cameraUri = remember(tempCameraFile) {
@@ -58,8 +58,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
         contract = ActivityResultContracts.TakePicture(),
         onResult = { success ->
             if (success) {
-                selectedUri = Uri.fromFile(tempCameraFile)
-                isCameraMode = true
+                selectedUriStr = Uri.fromFile(tempCameraFile).toString()
             } else {
                 if (tempCameraFile.exists()) {
                     tempCameraFile.delete()
@@ -101,114 +100,11 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
     val coroutineScope = rememberCoroutineScope()
 
     var isDeleteInProgress by remember { mutableStateOf(false) }
-    var pendingDeleteResult by remember { mutableStateOf<CompletableDeferred<Boolean>?>(null) }
-
-    val contentResolver = context.contentResolver
-
-    val deleteLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            pendingDeleteResult?.complete(true)
+    val onDeleteOriginal: suspend (Uri) -> Boolean = { _ ->
+        if (tempCameraFile.exists()) {
+            tempCameraFile.delete() || !tempCameraFile.exists()
         } else {
-            android.widget.Toast.makeText(context, "Без удаления оригинала функция блокировки недоступна", android.widget.Toast.LENGTH_LONG).show()
-            pendingDeleteResult?.complete(false)
-        }
-        pendingDeleteResult = null
-    }
-
-    // Convert Photo Picker URI -> MediaStore URI helper
-    fun getMediaStoreUriFromPickerUri(uri: Uri): Uri {
-        val uriString = uri.toString()
-        if (uriString.startsWith("content://media/external/")) {
-            return uri
-        }
-        
-        var mediaId: Long? = null
-        var isVideo = false
-        
-        for (segment in uri.pathSegments) {
-            if (segment.contains(":") || segment.contains("%3A")) {
-                val decoded = Uri.decode(segment)
-                val parts = decoded.split(":")
-                if (parts.size == 2) {
-                    val type = parts[0]
-                    val idVal = parts[1].toLongOrNull()
-                    if (idVal != null) {
-                        mediaId = idVal
-                        if (type.lowercase() == "video") {
-                            isVideo = true
-                        }
-                        break
-                    }
-                }
-            }
-        }
-        
-        if (mediaId == null) {
-            val lastSegment = uri.lastPathSegment
-            if (lastSegment != null) {
-                val idVal = lastSegment.toLongOrNull()
-                if (idVal != null) {
-                    mediaId = idVal
-                } else {
-                    val decoded = Uri.decode(lastSegment)
-                    if (decoded.contains(":")) {
-                        val parts = decoded.split(":")
-                        val lastPart = parts.lastOrNull()?.toLongOrNull()
-                        if (lastPart != null) {
-                            mediaId = lastPart
-                            if (parts[0].lowercase() == "video") {
-                                isVideo = true
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        if (mediaId != null) {
-            return if (isVideo) {
-                ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mediaId)
-            } else {
-                ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, mediaId)
-            }
-        }
-        
-        return uri
-    }
-
-    val onDeleteOriginal: suspend (Uri) -> Boolean = { uriToLock ->
-        val deferred = CompletableDeferred<Boolean>()
-        pendingDeleteResult = deferred
-        
-        val directUri = getMediaStoreUriFromPickerUri(uriToLock)
-
-        withContext(Dispatchers.Main) {
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    val intentSender = MediaStore.createDeleteRequest(contentResolver, listOf(directUri)).intentSender
-                    deleteLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
-                } else {
-                    val deletedRows = contentResolver.delete(directUri, null, null)
-                    deferred.complete(deletedRows > 0)
-                }
-            } catch (t: Throwable) {
-                t.printStackTrace()
-                try {
-                    val deletedRows = contentResolver.delete(directUri, null, null)
-                    deferred.complete(deletedRows > 0)
-                } catch (fallbackEx: Throwable) {
-                    fallbackEx.printStackTrace()
-                    android.widget.Toast.makeText(context, "Без удаления оригинала функция блокировки недоступна", android.widget.Toast.LENGTH_LONG).show()
-                    deferred.complete(false)
-                }
-            }
-        }
-        deferred.await()
-    }
-
-    val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) {
-            selectedUri = uri
+            true
         }
     }
 
@@ -308,27 +204,10 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
 
                         Button(
                             onClick = {
-                                pickMedia.launch(
-                                    androidx.activity.result.PickVisualMediaRequest(
-                                        ActivityResultContracts.PickVisualMedia.ImageOnly
-                                    )
-                                )
-                            },
-                            modifier = Modifier.fillMaxWidth().height(56.dp)
-                        ) {
-                            Icon(Icons.Default.Add, contentDescription = null)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Выбрать из галереи")
-                        }
-                        
-                        Spacer(modifier = Modifier.height(16.dp))
-                        
-                        OutlinedButton(
-                            onClick = {
                                 val hasCameraPermission = androidx.core.content.ContextCompat.checkSelfPermission(
                                     context,
                                     android.Manifest.permission.CAMERA
-                               ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
 
                                 if (hasCameraPermission) {
                                     if (tempCameraFile.exists()) {
@@ -461,19 +340,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                 coroutineScope.launch {
                                     val uriToLock = selectedUri!!
                                     try {
-                                        if (isCameraMode) {
-                                            viewModel.lockImage(uriToLock, durationMinutes) { _ ->
-                                                val deleted = if (tempCameraFile.exists()) {
-                                                    tempCameraFile.delete() || !tempCameraFile.exists()
-                                                } else {
-                                                    true
-                                                }
-                                                deleted
-                                            }
-                                        } else {
-                                            viewModel.lockImage(uriToLock, durationMinutes, onDeleteOriginal)
-                                        }
-                                        isCameraMode = false
+                                        viewModel.lockImage(uriToLock, durationMinutes, onDeleteOriginal)
                                     } catch (t: Throwable) {
                                         android.widget.Toast.makeText(context, "Ошибка при подготовке блокировки", android.widget.Toast.LENGTH_LONG).show()
                                         if (tempCameraFile.exists()) {
@@ -495,11 +362,10 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         Spacer(Modifier.height(16.dp))
                         OutlinedButton(
                             onClick = {
-                                selectedUri = null
+                                selectedUriStr = null
                                 if (tempCameraFile.exists()) {
                                     tempCameraFile.delete()
                                 }
-                                isCameraMode = false
                             }
                         ) {
                             Text("Отмена")
@@ -627,7 +493,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                 Button(
                                     onClick = {
                                         viewModel.completeAndClean()
-                                        selectedUri = null
+                                        selectedUriStr = null
                                     },
                                     colors = ButtonDefaults.buttonColors(
                                         containerColor = MaterialTheme.colorScheme.error
@@ -652,7 +518,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                     if (savedSuccessfully) {
                                         android.widget.Toast.makeText(context, "Успешно сохранено в галерею", android.widget.Toast.LENGTH_SHORT).show()
                                         viewModel.completeAndClean()
-                                        selectedUri = null
+                                        selectedUriStr = null
                                     } else {
                                         android.widget.Toast.makeText(context, "Не удалось сохранить файл или проверка целостности не прошла", android.widget.Toast.LENGTH_LONG).show()
                                     }
@@ -690,7 +556,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                     Spacer(Modifier.height(32.dp))
                     Button(onClick = { 
                         viewModel.completeAndClean()
-                        selectedUri = null
+                        selectedUriStr = null
                     }) {
                         Text("Reset")
                     }
@@ -765,7 +631,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         OutlinedButton(
                             onClick = {
                                 viewModel.cancelPendingLock()
-                                selectedUri = null
+                                selectedUriStr = null
                             },
                             modifier = Modifier.fillMaxWidth().height(56.dp)
                         ) {

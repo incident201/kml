@@ -209,6 +209,11 @@ class MainViewModel(
                     if (!hasRecoverable) {
                         _uiState.value = LockScreenState.MISSING_FILE
                     } else {
+                        val currentBootTime = SystemClock.elapsedRealtime()
+                        val bootTimeAtLock = repository.getBootTimeAtLock()
+                        if (currentBootTime < bootTimeAtLock) {
+                            repository.markReboot()
+                        }
                         _isStatusUnknown.value = false
                         _uiState.value = LockScreenState.LOCKED
                         startTimer()
@@ -430,6 +435,11 @@ class MainViewModel(
     private fun startTimer() {
         timerJob?.cancel()
         timerJob = viewModelScope.launch {
+            val currentBootTimeInitial = SystemClock.elapsedRealtime()
+            val bootTimeAtLockInitial = repository.getBootTimeAtLock()
+            if (currentBootTimeInitial < bootTimeAtLockInitial) {
+                repository.markReboot()
+            }
             if (repository.hadReboot()) {
                 val ntpTime = SntpClient.getCurrentTimeUtc()
                 if (ntpTime == null) {
