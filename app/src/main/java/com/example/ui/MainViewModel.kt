@@ -128,18 +128,34 @@ class MainViewModel(
             when (state) {
                 TransactionState.IDLE, TransactionState.CLEANED -> {
                     _isStatusUnknown.value = false
-                    _cleanupFailed.value = false
+                    val hasStaleFile = withContext(Dispatchers.IO) {
+                        cryptoManager.encryptedFileExists()
+                    }
+                    if (hasStaleFile) {
+                        _cleanupFailed.value = true
+                    } else {
+                        _cleanupFailed.value = false
+                    }
                     _uiState.value = LockScreenState.IDLE
                 }
                 TransactionState.ENCRYPTING, TransactionState.ENCRYPTED_VERIFIED -> {
                     _isStatusUnknown.value = false
-                    _cleanupFailed.value = false
                     // Safe cleanup - we didn't delete original yet
-                    withContext(Dispatchers.IO) {
+                    val fileDeleted = withContext(Dispatchers.IO) {
                         cryptoManager.deleteEncryptedFile()
                     }
-                    repository.clearLockSession()
-                    _uiState.value = LockScreenState.IDLE
+                    if (!fileDeleted) {
+                        _cleanupFailed.value = true
+                        _uiState.value = LockScreenState.IDLE
+                    } else {
+                        val prefsCleared = repository.clearLockSession()
+                        if (!prefsCleared) {
+                            _cleanupFailed.value = true
+                        } else {
+                            _cleanupFailed.value = false
+                        }
+                        _uiState.value = LockScreenState.IDLE
+                    }
                 }
                 TransactionState.DELETE_ORIGINAL_PENDING -> {
                     val originalUriStr = repository.getOriginalUri()
@@ -470,14 +486,20 @@ class MainViewModel(
             val fileDeleted = withContext(Dispatchers.IO) {
                 cryptoManager.deleteEncryptedFile()
             }
-            val prefsCleared = repository.clearLockSession()
-            if (fileDeleted && prefsCleared) {
-                _cleanupFailed.value = false
-                _uiState.value = LockScreenState.IDLE
-                _isStatusUnknown.value = false
-            } else {
+            if (!fileDeleted) {
                 _cleanupFailed.value = true
+                _uiState.value = LockScreenState.IDLE
+                return@launch
             }
+            val prefsCleared = repository.clearLockSession()
+            if (!prefsCleared) {
+                _cleanupFailed.value = true
+                _uiState.value = LockScreenState.IDLE
+                return@launch
+            }
+            _cleanupFailed.value = false
+            _uiState.value = LockScreenState.IDLE
+            _isStatusUnknown.value = false
         }
     }
 
