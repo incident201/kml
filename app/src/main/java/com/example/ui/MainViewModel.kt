@@ -29,6 +29,10 @@ enum class LockScreenState {
     IDLE, LOCKING, LOCKED, UNLOCKED_PENDING_EXPORT, MISSING_FILE, DELETE_ORIGINAL_PENDING, PERSISTENCE_ERROR
 }
 
+enum class OriginalStatus {
+    EXISTS, DELETED, UNKNOWN
+}
+
 class MainViewModel(
     private val cryptoManager: CryptoManager,
     private val repository: LockRepository,
@@ -128,12 +132,20 @@ class MainViewModel(
                     val originalUriStr = repository.getOriginalUri()
                     if (originalUriStr != null) {
                         val originalUri = Uri.parse(originalUriStr)
-                        val isDeleted = isOriginalDeleted(originalUri)
-                        if (isDeleted) {
-                            transitionToLockedState()
-                        } else {
-                            _canCancelLock.value = true
-                            _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+                        val status = checkOriginalStatus(originalUri)
+                        when (status) {
+                            OriginalStatus.DELETED -> {
+                                _canCancelLock.value = false
+                                transitionToLockedState()
+                            }
+                            OriginalStatus.EXISTS -> {
+                                _canCancelLock.value = true
+                                _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+                            }
+                            OriginalStatus.UNKNOWN -> {
+                                _canCancelLock.value = false
+                                _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+                            }
                         }
                     } else {
                         repository.clearLockSession()
@@ -259,30 +271,35 @@ class MainViewModel(
             }
 
             // 5. Post-deletion hard verification!
-            val verifyDeleted = isOriginalDeleted(uri)
-
-            if (!verifyDeleted) {
-                // Post-deletion check failed! The file still exists!
-                _canCancelLock.value = true
-                _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
-                return@launch
-            }
-
-            // 6. Success locking state setup
-            val durationMs = durationMinutes * 60 * 1000L
-            val endTimeUtc = currentNtpTime + durationMs
-            val bootTime = SystemClock.elapsedRealtime()
-            
-            val saveSuccess = repository.saveLockSession(endTimeUtc, bootTime, durationMs) &&
-                              repository.setTransactionState(TransactionState.LOCKED)
-            
-            if (saveSuccess) {
-                // Schedule Alarm
-                scheduleAlarm(endTimeUtc, currentNtpTime)
-                _uiState.value = LockScreenState.LOCKED
-                startTimer()
-            } else {
-                _uiState.value = LockScreenState.PERSISTENCE_ERROR
+            val status = checkOriginalStatus(uri)
+            when (status) {
+                OriginalStatus.DELETED -> {
+                    _canCancelLock.value = false
+                    // 6. Success locking state setup
+                    val durationMs = durationMinutes * 60 * 1000L
+                    val endTimeUtc = currentNtpTime + durationMs
+                    val bootTime = SystemClock.elapsedRealtime()
+                    
+                    val saveSuccess = repository.saveLockSession(endTimeUtc, bootTime, durationMs) &&
+                                      repository.setTransactionState(TransactionState.LOCKED)
+                    
+                    if (saveSuccess) {
+                        // Schedule Alarm
+                        scheduleAlarm(endTimeUtc, currentNtpTime)
+                        _uiState.value = LockScreenState.LOCKED
+                        startTimer()
+                    } else {
+                        _uiState.value = LockScreenState.PERSISTENCE_ERROR
+                    }
+                }
+                OriginalStatus.EXISTS -> {
+                    _canCancelLock.value = true
+                    _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+                }
+                OriginalStatus.UNKNOWN -> {
+                    _canCancelLock.value = false
+                    _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+                }
             }
         }
     }
@@ -294,42 +311,43 @@ class MainViewModel(
             
             _uiState.value = LockScreenState.LOCKING
             val deleted = onDeleteOriginal(originalUri)
-            if (deleted) {
-                // Post-deletion hard verify
-                val verifyDeleted = isOriginalDeleted(originalUri)
-                
-                if (!verifyDeleted) {
+            
+            val status = checkOriginalStatus(originalUri)
+            when (status) {
+                OriginalStatus.DELETED -> {
+                    _canCancelLock.value = false
+                    val currentNtpTime = SntpClient.getCurrentTimeUtc()
+                    val durationMinutes = repository.getDurationMinutes()
+                    val durationMs = durationMinutes * 60 * 1000L
+                    val bootTime = SystemClock.elapsedRealtime()
+                    
+                    val calculatedEndTime = if (currentNtpTime != null) {
+                        currentNtpTime + durationMs
+                    } else {
+                        System.currentTimeMillis() + durationMs
+                    }
+                    
+                    val saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs) &&
+                                      repository.setTransactionState(TransactionState.LOCKED)
+                    
+                    if (saveSuccess) {
+                        if (currentNtpTime != null) {
+                            scheduleAlarm(calculatedEndTime, currentNtpTime)
+                        }
+                        _uiState.value = LockScreenState.LOCKED
+                        startTimer()
+                    } else {
+                        _uiState.value = LockScreenState.PERSISTENCE_ERROR
+                    }
+                }
+                OriginalStatus.EXISTS -> {
                     _canCancelLock.value = true
                     _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
-                    return@launch
                 }
-
-                val currentNtpTime = SntpClient.getCurrentTimeUtc()
-                val durationMinutes = repository.getDurationMinutes()
-                val durationMs = durationMinutes * 60 * 1000L
-                val bootTime = SystemClock.elapsedRealtime()
-                
-                val calculatedEndTime = if (currentNtpTime != null) {
-                    currentNtpTime + durationMs
-                } else {
-                    System.currentTimeMillis() + durationMs
+                OriginalStatus.UNKNOWN -> {
+                    _canCancelLock.value = false
+                    _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
                 }
-                
-                val saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs) &&
-                                  repository.setTransactionState(TransactionState.LOCKED)
-                
-                if (saveSuccess) {
-                    if (currentNtpTime != null) {
-                        scheduleAlarm(calculatedEndTime, currentNtpTime)
-                    }
-                    _uiState.value = LockScreenState.LOCKED
-                    startTimer()
-                } else {
-                    _uiState.value = LockScreenState.PERSISTENCE_ERROR
-                }
-            } else {
-                _canCancelLock.value = true
-                _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
             }
         }
     }
@@ -475,8 +493,8 @@ class MainViewModel(
                 // Verify saved URI SHA-256 and integrity
                 val verified = cryptoManager.verifySavedUriIntegrity(insertedUri, originalSha256)
                 if (verified) {
-                    val stateWritten = repository.setTransactionState(TransactionState.RESTORED_VERIFIED)
-                    stateWritten
+                    repository.setTransactionState(TransactionState.RESTORED_VERIFIED)
+                    true
                 } else {
                     contentResolver.delete(insertedUri, null, null)
                     false
@@ -495,21 +513,40 @@ class MainViewModel(
         }
     }
 
-    private suspend fun isOriginalDeleted(uri: Uri): Boolean {
+    private suspend fun checkOriginalStatus(uri: Uri): OriginalStatus {
         return withContext(Dispatchers.IO) {
-            val directUri = getMediaStoreUriFromPickerUri(uri)
-            try {
-                context.contentResolver.query(
-                    directUri,
-                    arrayOf(MediaStore.MediaColumns._ID),
-                    null,
-                    null,
-                    null
-                )?.use { cursor ->
-                    cursor.count == 0
-                } ?: false
-            } catch (e: Exception) {
-                false
+            val scheme = uri.scheme
+            if (scheme == "file") {
+                val filePath = uri.path
+                if (filePath != null) {
+                    val file = java.io.File(filePath)
+                    if (file.exists()) {
+                        OriginalStatus.EXISTS
+                    } else {
+                        OriginalStatus.DELETED
+                    }
+                } else {
+                    OriginalStatus.UNKNOWN
+                }
+            } else {
+                val directUri = getMediaStoreUriFromPickerUri(uri)
+                try {
+                    context.contentResolver.query(
+                        directUri,
+                        arrayOf(MediaStore.MediaColumns._ID),
+                        null,
+                        null,
+                        null
+                    )?.use { cursor ->
+                        if (cursor.count == 0) {
+                            OriginalStatus.DELETED
+                        } else {
+                            OriginalStatus.EXISTS
+                        }
+                    } ?: OriginalStatus.UNKNOWN
+                } catch (e: Exception) {
+                    OriginalStatus.UNKNOWN
+                }
             }
         }
     }
