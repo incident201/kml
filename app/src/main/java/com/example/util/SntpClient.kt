@@ -1,19 +1,66 @@
 package com.example.util
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.HttpURLConnection
 import java.net.InetAddress
+import java.net.URL
 
 object SntpClient {
+
+    private val NTP_SERVERS = listOf(
+        "time.google.com",
+        "time.cloudflare.com",
+        "pool.ntp.org",
+        "time.windows.com"
+    )
+
+    private val HTTPS_TIME_URLS = listOf(
+        "https://www.google.com/generate_204",
+        "https://www.cloudflare.com/",
+        "https://www.microsoft.com/"
+    )
+
     suspend fun getCurrentTimeUtc(): Long? = withContext(Dispatchers.IO) {
+        // 1. Try NTP servers in parallel
+        val ntpJobs = NTP_SERVERS.map { server ->
+            async {
+                withTimeoutOrNull(2500) {
+                    queryNtpServer(server)
+                }
+            }
+        }
+        val ntpResults = ntpJobs.mapNotNull { it.await() }
+        if (ntpResults.isNotEmpty()) {
+            return@withContext getLowerMedian(ntpResults)
+        }
+
+        // 2. Try HTTPS headers fallback in parallel
+        val httpsJobs = HTTPS_TIME_URLS.map { url ->
+            async {
+                withTimeoutOrNull(3000) {
+                    queryHttpsDate(url)
+                }
+            }
+        }
+        val httpsResults = httpsJobs.mapNotNull { it.await() }
+        if (httpsResults.isNotEmpty()) {
+            return@withContext getLowerMedian(httpsResults)
+        }
+
+        null
+    }
+
+    private fun queryNtpServer(server: String): Long? {
         var socket: DatagramSocket? = null
         try {
-            val ntpServer = "pool.ntp.org"
-            val address = InetAddress.getByName(ntpServer)
+            val address = InetAddress.getByName(server)
             socket = DatagramSocket()
-            socket.soTimeout = 5000
+            socket.soTimeout = 2500
             val buffer = ByteArray(48)
             buffer[0] = 0x1B // NTP string request (version 3, mode 3)
             val request = DatagramPacket(buffer, buffer.size, address, 123)
@@ -32,12 +79,40 @@ object SntpClient {
                 fraction = (fraction shl 8) or (buffer[offset + i].toLong() and 0xffL)
             }
             val ntpTimeMilliseconds = ((seconds - 2208988800L) * 1000) + ((fraction * 1000L) / 0x100000000L)
-            ntpTimeMilliseconds
+            return ntpTimeMilliseconds
         } catch (e: Exception) {
             e.printStackTrace()
-            null
+            return null
         } finally {
             socket?.close()
         }
+    }
+
+    private fun queryHttpsDate(urlString: String): Long? {
+        var connection: HttpURLConnection? = null
+        try {
+            val url = URL(urlString)
+            connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "HEAD"
+            connection.connectTimeout = 3000
+            connection.readTimeout = 3000
+            connection.instanceFollowRedirects = true
+            
+            val dateValue = connection.getHeaderFieldDate("Date", -1L)
+            if (dateValue != -1L) {
+                return dateValue
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            connection?.disconnect()
+        }
+        return null
+    }
+
+    private fun getLowerMedian(times: List<Long>): Long {
+        val sorted = times.sorted()
+        val index = (sorted.size - 1) / 2
+        return sorted[index]
     }
 }

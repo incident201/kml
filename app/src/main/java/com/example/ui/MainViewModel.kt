@@ -26,7 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 
 enum class LockScreenState {
-    IDLE, LOCKING, LOCKED, UNLOCKED_PENDING_EXPORT, MISSING_FILE, DELETE_ORIGINAL_PENDING, PERSISTENCE_ERROR
+    IDLE, LOCKING, LOCKED, UNLOCKED_PENDING_EXPORT, MISSING_FILE, DELETE_ORIGINAL_PENDING, PERSISTENCE_ERROR, TIME_SYNC_REQUIRED
 }
 
 enum class OriginalStatus {
@@ -241,20 +241,18 @@ class MainViewModel(
         
         viewModelScope.launch {
             val currentNtpTime = SntpClient.getCurrentTimeUtc()
-            val calculatedEndTime = if (currentNtpTime != null) {
-                currentNtpTime + durationMs
-            } else {
-                System.currentTimeMillis() + durationMs
+            if (currentNtpTime == null) {
+                _uiState.value = LockScreenState.TIME_SYNC_REQUIRED
+                return@launch
             }
+            val calculatedEndTime = currentNtpTime + durationMs
             val bootTime = SystemClock.elapsedRealtime()
             
             val saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs) &&
-                              repository.setTransactionState(TransactionState.LOCKED)
+                               repository.setTransactionState(TransactionState.LOCKED)
             
             if (saveSuccess) {
-                if (currentNtpTime != null) {
-                    scheduleAlarm(calculatedEndTime, currentNtpTime)
-                }
+                scheduleAlarm(calculatedEndTime, currentNtpTime)
                 _uiState.value = LockScreenState.LOCKED
                 startTimer()
             } else {
@@ -395,23 +393,20 @@ class MainViewModel(
                     _canCancelLock.value = false
                     _isStatusUnknown.value = false
                     val currentNtpTime = SntpClient.getCurrentTimeUtc()
+                    if (currentNtpTime == null) {
+                        _uiState.value = LockScreenState.TIME_SYNC_REQUIRED
+                        return@launch
+                    }
                     val durationMinutes = repository.getDurationMinutes()
                     val durationMs = durationMinutes * 60 * 1000L
                     val bootTime = SystemClock.elapsedRealtime()
-                    
-                    val calculatedEndTime = if (currentNtpTime != null) {
-                        currentNtpTime + durationMs
-                    } else {
-                        System.currentTimeMillis() + durationMs
-                    }
+                    val calculatedEndTime = currentNtpTime + durationMs
                     
                     val saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs) &&
                                       repository.setTransactionState(TransactionState.LOCKED)
                     
                     if (saveSuccess) {
-                        if (currentNtpTime != null) {
-                            scheduleAlarm(calculatedEndTime, currentNtpTime)
-                        }
+                        scheduleAlarm(calculatedEndTime, currentNtpTime)
                         _uiState.value = LockScreenState.LOCKED
                         startTimer()
                     } else {
@@ -435,39 +430,35 @@ class MainViewModel(
     private fun startTimer() {
         timerJob?.cancel()
         timerJob = viewModelScope.launch {
+            if (repository.hadReboot()) {
+                val ntpTime = SntpClient.getCurrentTimeUtc()
+                if (ntpTime == null) {
+                    _uiState.value = LockScreenState.TIME_SYNC_REQUIRED
+                    return@launch
+                } else {
+                    val endNtpUtx = repository.getEndTimeUtc()
+                    val currentBootTime = SystemClock.elapsedRealtime()
+                    val passedSinceLock = repository.getDurationMs() - (endNtpUtx - ntpTime)
+                    repository.saveLockSession(endNtpUtx, currentBootTime - passedSinceLock, repository.getDurationMs())
+                }
+            }
+
             while (_uiState.value == LockScreenState.LOCKED) {
                 try {
                     val endNtpUtx = repository.getEndTimeUtc()
                     val bootAtLock = repository.getBootTimeAtLock()
                     
-                    var hasValidTime = false
-                    var currentEstimateUtc = 0L
+                    val currentBootTime = SystemClock.elapsedRealtime()
+                    val passed = currentBootTime - bootAtLock
+                    val startNtp = endNtpUtx - repository.getDurationMs()
+                    val currentEstimateUtc = startNtp + passed
 
-                    if (repository.hadReboot()) {
-                        val ntpTime = SntpClient.getCurrentTimeUtc()
-                        if (ntpTime != null) {
-                            hasValidTime = true
-                            currentEstimateUtc = ntpTime
-                            val currentBootTime = SystemClock.elapsedRealtime()
-                            val passedSinceLock = repository.getDurationMs() - (endNtpUtx - ntpTime)
-                            repository.saveLockSession(endNtpUtx, currentBootTime - passedSinceLock, repository.getDurationMs())
-                        }
+                    val remaining = endNtpUtx - currentEstimateUtc
+                    if (remaining <= 0) {
+                        unlock()
+                        break
                     } else {
-                        val currentBootTime = SystemClock.elapsedRealtime()
-                        val passed = currentBootTime - bootAtLock
-                        val startNtp = endNtpUtx - repository.getDurationMs()
-                        currentEstimateUtc = startNtp + passed
-                        hasValidTime = true
-                    }
-
-                    if (hasValidTime) {
-                        val remaining = endNtpUtx - currentEstimateUtc
-                        if (remaining <= 0) {
-                            unlock()
-                            break
-                        } else {
-                            _timeLeftMs.value = remaining
-                        }
+                        _timeLeftMs.value = remaining
                     }
                 } catch (t: Throwable) {
                     t.printStackTrace()
@@ -476,6 +467,10 @@ class MainViewModel(
                 delay(1000)
             }
         }
+    }
+
+    fun retryTimeSync() {
+        checkCurrentState()
     }
 
     suspend fun verifyAndUnlockWithNtp(): Boolean {
