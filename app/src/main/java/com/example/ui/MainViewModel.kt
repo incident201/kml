@@ -202,8 +202,9 @@ class MainViewModel(
                     }
                 }
                 TransactionState.LOCKED -> {
+                    val originalSha256 = repository.getOriginalSha256() ?: ""
                     val hasRecoverable = withContext(Dispatchers.IO) {
-                        cryptoManager.recoverableEncryptedFileExists()
+                        cryptoManager.recoverableEncryptedFileIsValid(originalSha256)
                     }
                     if (!hasRecoverable) {
                         _uiState.value = LockScreenState.MISSING_FILE
@@ -214,8 +215,9 @@ class MainViewModel(
                     }
                 }
                 TransactionState.UNLOCKED_PENDING_EXPORT -> {
+                    val originalSha256 = repository.getOriginalSha256() ?: ""
                     val hasRecoverable = withContext(Dispatchers.IO) {
-                        cryptoManager.recoverableEncryptedFileExists()
+                        cryptoManager.recoverableEncryptedFileIsValid(originalSha256)
                     }
                     if (!hasRecoverable) {
                         _uiState.value = LockScreenState.MISSING_FILE
