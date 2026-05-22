@@ -241,6 +241,10 @@ class CryptoManager(private val context: Context) {
         return lockFile.exists() || lockFileTmp.exists()
     }
 
+    fun recoverableEncryptedFileExists(): Boolean {
+        return lockFile.exists()
+    }
+
     fun deleteEncryptedFile(): Boolean {
         var success = true
         if (lockFile.exists()) {

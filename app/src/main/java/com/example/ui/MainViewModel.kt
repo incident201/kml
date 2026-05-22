@@ -158,10 +158,10 @@ class MainViewModel(
                     }
                 }
                 TransactionState.DELETE_ORIGINAL_PENDING -> {
-                    val hasEncrypted = withContext(Dispatchers.IO) {
-                        cryptoManager.encryptedArtifactsExist()
+                    val hasRecoverable = withContext(Dispatchers.IO) {
+                        cryptoManager.recoverableEncryptedFileExists()
                     }
-                    if (!hasEncrypted) {
+                    if (!hasRecoverable) {
                         val originalUriStr = repository.getOriginalUri()
                         val originalStatus = originalUriStr?.let { checkOriginalStatus(Uri.parse(it)) }
 
@@ -197,18 +197,16 @@ class MainViewModel(
                                 }
                             }
                         } else {
-                            _isStatusUnknown.value = false
-                            val prefsCleared = repository.clearLockSession()
-                            _cleanupFailed.value = !prefsCleared
-                            _uiState.value = LockScreenState.IDLE
+                            // We have an encrypted file, but originalUriStr is missing in prefs. Let's delete it.
+                            performLockboxFailureCleanup()
                         }
                     }
                 }
                 TransactionState.LOCKED -> {
-                    val hasEncrypted = withContext(Dispatchers.IO) {
-                        cryptoManager.encryptedArtifactsExist()
+                    val hasRecoverable = withContext(Dispatchers.IO) {
+                        cryptoManager.recoverableEncryptedFileExists()
                     }
-                    if (!hasEncrypted) {
+                    if (!hasRecoverable) {
                         _uiState.value = LockScreenState.MISSING_FILE
                     } else {
                         _isStatusUnknown.value = false
@@ -217,10 +215,10 @@ class MainViewModel(
                     }
                 }
                 TransactionState.UNLOCKED_PENDING_EXPORT -> {
-                    val hasEncrypted = withContext(Dispatchers.IO) {
-                        cryptoManager.encryptedArtifactsExist()
+                    val hasRecoverable = withContext(Dispatchers.IO) {
+                        cryptoManager.recoverableEncryptedFileExists()
                     }
-                    if (!hasEncrypted) {
+                    if (!hasRecoverable) {
                         _uiState.value = LockScreenState.MISSING_FILE
                     } else {
                         _isStatusUnknown.value = false
@@ -370,10 +368,10 @@ class MainViewModel(
             val originalUriStr = repository.getOriginalUri() ?: return@launch
             val originalUri = Uri.parse(originalUriStr)
             
-            val hasEncrypted = withContext(Dispatchers.IO) {
-                cryptoManager.encryptedArtifactsExist()
+            val hasRecoverable = withContext(Dispatchers.IO) {
+                cryptoManager.recoverableEncryptedFileExists()
             }
-            if (!hasEncrypted) {
+            if (!hasRecoverable) {
                 performLockboxFailureCleanup()
                 return@launch
             }
