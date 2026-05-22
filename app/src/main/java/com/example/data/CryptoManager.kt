@@ -92,43 +92,39 @@ class CryptoManager(private val context: Context) {
     }
 
     fun encryptAndSave(inputUri: Uri, expectedSha256: String): Boolean {
-        val lockFileTmp = File(context.filesDir, "locked_image.enc.tmp")
-        
         return try {
-            if (lockFileTmp.exists()) {
-                lockFileTmp.delete()
+            if (lockFile.exists()) {
+                lockFile.delete()
             }
-            val encryptedFileTmp = EncryptedFile.Builder(
+            val encryptedFile = EncryptedFile.Builder(
                 context,
-                lockFileTmp,
+                lockFile,
                 masterKey,
                 EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB
             ).build()
 
             val openInput = context.contentResolver.openInputStream(inputUri) ?: return false
             openInput.use { inputStream ->
-                encryptedFileTmp.openFileOutput().use { outputStream ->
+                encryptedFile.openFileOutput().use { outputStream ->
                     inputStream.copyTo(outputStream)
                 }
             }
 
             // Verify sha256/integrity of decrypted bytes immediately
-            val verified = verifyFileIntegrity(lockFileTmp, expectedSha256)
+            val verified = verifyFileIntegrity(lockFile, expectedSha256)
             if (verified) {
+                true
+            } else {
                 if (lockFile.exists()) {
                     lockFile.delete()
-                }
-                val renameSuccess = lockFileTmp.renameTo(lockFile)
-                renameSuccess
-            } else {
-                if (lockFileTmp.exists()) {
-                    lockFileTmp.delete()
                 }
                 false
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            if (lockFileTmp.exists()) lockFileTmp.delete()
+            if (lockFile.exists()) {
+                lockFile.delete()
+            }
             false
         }
     }
