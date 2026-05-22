@@ -134,7 +134,9 @@ class MainViewModel(
             }
             if (hasValidEncryptedFileForManifest) {
                 val state = try { repository.getTransactionState() } catch (e: Exception) { TransactionState.IDLE }
-                if (state == TransactionState.IDLE || state == TransactionState.CLEANED || state == TransactionState.DELETE_ORIGINAL_PENDING) {
+                // Only fall back to EMERGENCY_RECOVERY if preferences/database state is IDLE or CLEANED,
+                // meaning we have no record of an active session in preferences, yet a valid manifest and encrypted file exist and original is deleted.
+                if (state == TransactionState.IDLE || state == TransactionState.CLEANED) {
                     val originalUriStr = manifest!!.originalUri
                     val originalStatus = if (originalUriStr.isNotEmpty()) checkOriginalStatus(Uri.parse(originalUriStr)) else OriginalStatus.DELETED
                     if (originalStatus == OriginalStatus.DELETED) {
@@ -313,6 +315,7 @@ class MainViewModel(
                 performLockboxFailureCleanup()
                 return@launch
             }
+            val startBootTime = SystemClock.elapsedRealtime()
             val durationMs = durationMinutes * 60 * 1000L
             val plannedEndTimeUtc = currentNtpTime + durationMs
 
@@ -381,9 +384,7 @@ class MainViewModel(
                     if (endTimeUtc == 0L) {
                         endTimeUtc = currentNtpTime + durationMs
                     }
-                    val lockStartUtc = endTimeUtc - durationMs
-                    val elapsedSinceStart = (currentNtpTime - lockStartUtc).coerceAtLeast(0L)
-                    val bootTime = SystemClock.elapsedRealtime() - elapsedSinceStart
+                    val bootTime = startBootTime
                     
                     val saveSuccess = repository.saveLockSession(endTimeUtc, bootTime, durationMs) &&
                                       repository.setTransactionState(TransactionState.LOCKED)
