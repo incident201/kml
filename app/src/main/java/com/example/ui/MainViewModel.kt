@@ -129,7 +129,7 @@ class MainViewModel(
                 TransactionState.IDLE, TransactionState.CLEANED -> {
                     _isStatusUnknown.value = false
                     val hasStaleFile = withContext(Dispatchers.IO) {
-                        cryptoManager.encryptedFileExists()
+                        cryptoManager.encryptedArtifactsExist()
                     }
                     if (hasStaleFile) {
                         _cleanupFailed.value = true
@@ -275,34 +275,26 @@ class MainViewModel(
                 cryptoManager.encryptAndSave(uri, originalMeta.sha256) 
             }
             if (!encryptSuccess) {
-                withContext(Dispatchers.IO) { cryptoManager.deleteEncryptedFile() }
-                repository.clearLockSession()
-                _uiState.value = LockScreenState.IDLE
+                performLockboxFailureCleanup()
                 return@launch
             }
 
             // 3. Document verified encrypted state
             if (!repository.setTransactionState(TransactionState.ENCRYPTED_VERIFIED)) {
-                withContext(Dispatchers.IO) { cryptoManager.deleteEncryptedFile() }
-                repository.clearLockSession()
-                _uiState.value = LockScreenState.IDLE
+                performLockboxFailureCleanup()
                 return@launch
             }
 
             // 4. Deletion flow transition
             if (!repository.setTransactionState(TransactionState.DELETE_ORIGINAL_PENDING)) {
-                withContext(Dispatchers.IO) { cryptoManager.deleteEncryptedFile() }
-                repository.clearLockSession()
-                _uiState.value = LockScreenState.IDLE
+                performLockboxFailureCleanup()
                 return@launch
             }
             
             val deleted = onDeleteOriginal(uri)
             if (!deleted) {
                 // Deletion dialog rejected or failed
-                withContext(Dispatchers.IO) { cryptoManager.deleteEncryptedFile() }
-                repository.clearLockSession()
-                _uiState.value = LockScreenState.IDLE
+                performLockboxFailureCleanup()
                 return@launch
             }
 
@@ -480,26 +472,30 @@ class MainViewModel(
         _unlockedBitmap.value = null
     }
 
+    private suspend fun performLockboxFailureCleanup() {
+        val fileDeleted = withContext(Dispatchers.IO) {
+            cryptoManager.deleteEncryptedFile()
+        }
+        if (!fileDeleted) {
+            _cleanupFailed.value = true
+            _uiState.value = LockScreenState.IDLE
+            return
+        }
+        val prefsCleared = repository.clearLockSession()
+        if (!prefsCleared) {
+            _cleanupFailed.value = true
+            _uiState.value = LockScreenState.IDLE
+            return
+        }
+        _cleanupFailed.value = false
+        _uiState.value = LockScreenState.IDLE
+        _isStatusUnknown.value = false
+    }
+
     fun completeAndClean() {
         cleanupBitmap()
         viewModelScope.launch {
-            val fileDeleted = withContext(Dispatchers.IO) {
-                cryptoManager.deleteEncryptedFile()
-            }
-            if (!fileDeleted) {
-                _cleanupFailed.value = true
-                _uiState.value = LockScreenState.IDLE
-                return@launch
-            }
-            val prefsCleared = repository.clearLockSession()
-            if (!prefsCleared) {
-                _cleanupFailed.value = true
-                _uiState.value = LockScreenState.IDLE
-                return@launch
-            }
-            _cleanupFailed.value = false
-            _uiState.value = LockScreenState.IDLE
-            _isStatusUnknown.value = false
+            performLockboxFailureCleanup()
         }
     }
 

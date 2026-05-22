@@ -236,8 +236,9 @@ class CryptoManager(private val context: Context) {
         }
     }
 
-    fun encryptedFileExists(): Boolean {
-        return lockFile.exists()
+    fun encryptedArtifactsExist(): Boolean {
+        val lockFileTmp = File(context.filesDir, "locked_image.enc.tmp")
+        return lockFile.exists() || lockFileTmp.exists()
     }
 
     fun deleteEncryptedFile(): Boolean {
