@@ -11,10 +11,15 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -25,6 +30,14 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.Preview as CameraPreview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -35,6 +48,7 @@ import kotlinx.coroutines.withContext
 fun KeepMeLockedScreen(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     val timeLeftMs by viewModel.timeLeftMs.collectAsState()
+    val emergencyTimeLeftMs by viewModel.emergencyTimeLeftMs.collectAsState()
     val unlockedBitmap by viewModel.unlockedBitmap.collectAsState()
     val canCancelLock by viewModel.canCancelLock.collectAsState()
     val isStatusUnknown by viewModel.isStatusUnknown.collectAsState()
@@ -45,49 +59,18 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
     var selectedUriStr by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
     val selectedUri = remember(selectedUriStr) { selectedUriStr?.let { Uri.parse(it) } }
 
-    val tempCameraFile = remember { java.io.File(context.cacheDir, "camera_capture.jpg") }
-    val cameraUri = remember(tempCameraFile) {
-        androidx.core.content.FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            tempCameraFile
-        )
-    }
-
-    val cameraLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicture(),
-        onResult = { success ->
-            if (success) {
-                selectedUriStr = Uri.fromFile(tempCameraFile).toString()
-            } else {
-                if (tempCameraFile.exists()) {
-                    tempCameraFile.delete()
-                }
-            }
-        }
-    )
+    var showCameraView by remember { mutableStateOf(false) }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
         onResult = { isGranted ->
             if (isGranted) {
-                if (tempCameraFile.exists()) {
-                    tempCameraFile.delete()
-                }
-                cameraLauncher.launch(cameraUri)
+                showCameraView = true
             } else {
                 android.widget.Toast.makeText(context, "Разрешение на камеру отклонено", android.widget.Toast.LENGTH_SHORT).show()
             }
         }
     )
-
-    DisposableEffect(Unit) {
-        onDispose {
-            if (tempCameraFile.exists()) {
-                tempCameraFile.delete()
-            }
-        }
-    }
     
     var selectedDays by remember { mutableStateOf(0) }
     var selectedHours by remember { mutableStateOf(0) }
@@ -100,11 +83,24 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
     val coroutineScope = rememberCoroutineScope()
 
     var isDeleteInProgress by remember { mutableStateOf(false) }
-    val onDeleteOriginal: suspend (Uri) -> Boolean = { _ ->
-        if (tempCameraFile.exists()) {
-            tempCameraFile.delete() || !tempCameraFile.exists()
-        } else {
-            true
+    val onDeleteOriginal: suspend (Uri) -> Boolean = { uriToDelete ->
+        withContext(Dispatchers.IO) {
+            val scheme = uriToDelete.scheme
+            if (scheme == "file") {
+                val path = uriToDelete.path
+                if (path != null) {
+                    val file = java.io.File(path)
+                    if (file.exists() && file.absolutePath.contains("staging")) {
+                        file.delete() || !file.exists()
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
         }
     }
 
@@ -125,7 +121,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
     }
 
     LaunchedEffect(uiState) {
-        if (uiState == LockScreenState.LOCKED) {
+        if (uiState == LockScreenState.LOCKED || uiState == LockScreenState.EMERGENCY_RECOVERY) {
             activity?.window?.setFlags(
                 WindowManager.LayoutParams.FLAG_SECURE,
                 WindowManager.LayoutParams.FLAG_SECURE
@@ -135,96 +131,104 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("KeepMeLocked") },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
+    if (showCameraView) {
+        CameraCaptureView(
+            onImageCaptured = { uri ->
+                selectedUriStr = uri.toString()
+                showCameraView = false
+            },
+            onClose = {
+                showCameraView = false
+            }
+        )
+    } else {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("KeepMeLocked") },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
                 )
-            )
-        }
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            when (uiState) {
-                LockScreenState.IDLE -> {
-                    Icon(
-                        imageVector = Icons.Default.Lock,
-                        contentDescription = null,
-                        modifier = Modifier.size(72.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Text(
-                        text = "Lock a photo securely",
-                        style = MaterialTheme.typography.headlineMedium
-                    )
-                    Spacer(modifier = Modifier.height(32.dp))
+            }
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                when (uiState) {
+                    LockScreenState.IDLE -> {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            modifier = Modifier.size(72.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Text(
+                            text = "Lock a photo securely",
+                            style = MaterialTheme.typography.headlineMedium
+                        )
+                        Spacer(modifier = Modifier.height(32.dp))
 
-                    if (selectedUri == null) {
-                        if (cleanupFailed) {
-                            Card(
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.errorContainer
-                                ),
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(16.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally
+                        if (selectedUri == null) {
+                            if (cleanupFailed) {
+                                Card(
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.errorContainer
+                                    ),
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
                                 ) {
-                                    Text(
-                                        text = "Экспорт завершён успешно, но при очистке зашифрованных локальных временных файлов локбокса произошла неизвестная системная ошибка. Пожалуйста, повторите ручную очистку локбокса прямо сейчас, чтобы полностью уничтожить защищенную ковербиту.",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onErrorContainer,
-                                        textAlign = TextAlign.Center
-                                    )
-                                    Spacer(modifier = Modifier.height(12.dp))
-                                    Button(
-                                        onClick = {
-                                            viewModel.completeAndClean()
-                                        },
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = MaterialTheme.colorScheme.error
-                                        )
+                                    Column(
+                                        modifier = Modifier.padding(16.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally
                                     ) {
-                                        Text("Повторить ручную очистку локбокса")
+                                        Text(
+                                            text = "Экспорт завершён успешно, но при очистке зашифрованных локальных временных файлов локбокса произошла неизвестная системная ошибка. Пожалуйста, повторите ручную очистку локбокса прямо сейчас, чтобы полностью уничтожить защищенную ковербиту.",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onErrorContainer,
+                                            textAlign = TextAlign.Center
+                                        )
+                                        Spacer(modifier = Modifier.height(12.dp))
+                                        Button(
+                                            onClick = {
+                                                viewModel.completeAndClean()
+                                            },
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = MaterialTheme.colorScheme.error
+                                            )
+                                        ) {
+                                            Text("Повторить ручную очистку локбокса")
+                                        }
                                     }
                                 }
+                                Spacer(modifier = Modifier.height(24.dp))
                             }
-                            Spacer(modifier = Modifier.height(24.dp))
-                        }
 
-                        Button(
-                            onClick = {
-                                val hasCameraPermission = androidx.core.content.ContextCompat.checkSelfPermission(
-                                    context,
-                                    android.Manifest.permission.CAMERA
-                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                            Button(
+                                onClick = {
+                                    val hasCameraPermission = androidx.core.content.ContextCompat.checkSelfPermission(
+                                        context,
+                                        android.Manifest.permission.CAMERA
+                                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
 
-                                if (hasCameraPermission) {
-                                    if (tempCameraFile.exists()) {
-                                        tempCameraFile.delete()
+                                    if (hasCameraPermission) {
+                                        showCameraView = true
+                                    } else {
+                                        cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
                                     }
-                                    cameraLauncher.launch(cameraUri)
-                                } else {
-                                    cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth().height(56.dp)
-                        ) {
-                            CameraIcon()
-                            Spacer(Modifier.width(8.dp))
-                            Text("Сделать снимок")
-                        }
-                    } else {
+                                },
+                                modifier = Modifier.fillMaxWidth().height(56.dp)
+                            ) {
+                                CameraIcon()
+                                Spacer(Modifier.width(8.dp))
+                                Text("Сделать снимок")
+                            }
+                        } else {
                         Text(
                             text = "Выберите время блокировки",
                             style = MaterialTheme.typography.titleMedium,
@@ -343,9 +347,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                         viewModel.lockImage(uriToLock, durationMinutes, onDeleteOriginal)
                                     } catch (t: Throwable) {
                                         android.widget.Toast.makeText(context, "Ошибка при подготовке блокировки", android.widget.Toast.LENGTH_LONG).show()
-                                        if (tempCameraFile.exists()) {
-                                            tempCameraFile.delete()
-                                        }
+                                        onDeleteOriginal(uriToLock)
                                         viewModel.completeAndClean()
                                     } finally {
                                         isDeleteInProgress = false
@@ -362,9 +364,12 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         Spacer(Modifier.height(16.dp))
                         OutlinedButton(
                             onClick = {
+                                val currentUriStr = selectedUriStr
                                 selectedUriStr = null
-                                if (tempCameraFile.exists()) {
-                                    tempCameraFile.delete()
+                                if (currentUriStr != null) {
+                                    coroutineScope.launch {
+                                        onDeleteOriginal(Uri.parse(currentUriStr))
+                                    }
                                 }
                             }
                         ) {
@@ -671,6 +676,92 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                     ) {
                         Text("Повторить сохранение сессии")
                     }
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.switchToEmergencyRecovery()
+                        },
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                    ) {
+                        Text("Перейти в аварийный режим")
+                    }
+                }
+                LockScreenState.EMERGENCY_RECOVERY -> {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        modifier = Modifier.size(72.dp),
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Text(
+                        text = "Аварийное восстановление",
+                        style = MaterialTheme.typography.headlineSmall,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Системные настройки повреждены или стерты. Ваш файл зашифрован и находится в безопасности. Дождитесь окончания времени блокировки для экспорта.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+                    Spacer(modifier = Modifier.height(32.dp))
+
+                    val days = emergencyTimeLeftMs / (1000 * 60 * 60 * 24)
+                    val hours = (emergencyTimeLeftMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60)
+                    val minutes = (emergencyTimeLeftMs % (1000 * 60 * 60)) / (1000 * 60)
+                    val seconds = (emergencyTimeLeftMs % (1000 * 60)) / 1000
+                    
+                    val timeString = if (days > 0) {
+                        String.format("%d дн. %02d:%02d:%02d", days, hours, minutes, seconds)
+                    } else if (emergencyTimeLeftMs == -1L) {
+                        "Синхронизация времени..."
+                    } else {
+                        String.format("%02d:%02d:%02d", hours, minutes, seconds)
+                    }
+
+                    Text(
+                        text = timeString,
+                        style = MaterialTheme.typography.displayMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(32.dp))
+
+                    var isSaving by remember { mutableStateOf(false) }
+
+                    Button(
+                        onClick = {
+                            isSaving = true
+                            coroutineScope.launch {
+                                try {
+                                    val savedSuccessfully = viewModel.emergencyExport()
+                                    if (savedSuccessfully) {
+                                        android.widget.Toast.makeText(context, "Файл успешно экспортирован", android.widget.Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        android.widget.Toast.makeText(context, "Не удалось экспортировать файл", android.widget.Toast.LENGTH_LONG).show()
+                                    }
+                                } catch (t: Throwable) {
+                                    t.printStackTrace()
+                                    android.widget.Toast.makeText(context, "Ошибка экспорта", android.widget.Toast.LENGTH_LONG).show()
+                                } finally {
+                                    isSaving = false
+                                }
+                            }
+                        },
+                        enabled = !isSaving && emergencyTimeLeftMs == 0L,
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                    ) {
+                        if (isSaving) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Color.White)
+                        } else {
+                            Text("Экспортировать из аварийного локбокса")
+                        }
+                    }
                 }
                 LockScreenState.TIME_SYNC_REQUIRED -> {
                     Icon(
@@ -722,6 +813,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
             }
         }
     }
+}
 }
 
 @Composable
@@ -881,5 +973,123 @@ fun CameraIcon(modifier: Modifier = Modifier, color: Color = androidx.compose.ma
             center = androidx.compose.ui.geometry.Offset(flashCenterX, flashCenterY),
             style = androidx.compose.ui.graphics.drawscope.Fill
         )
+    }
+}
+
+@Composable
+fun CameraCaptureView(
+    onImageCaptured: (Uri) -> Unit,
+    onClose: () -> Unit
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+
+    var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                val previewView = PreviewView(ctx).apply {
+                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                }
+                val executor = ContextCompat.getMainExecutor(ctx)
+                cameraProviderFuture.addListener({
+                    val cameraProvider = cameraProviderFuture.get()
+                    val preview = CameraPreview.Builder().build().also {
+                        it.setSurfaceProvider(previewView.surfaceProvider)
+                    }
+                    val capture = ImageCapture.Builder()
+                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                        .build()
+                    imageCapture = capture
+
+                    val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                    try {
+                        cameraProvider.unbindAll()
+                        cameraProvider.bindToLifecycle(
+                            lifecycleOwner,
+                            cameraSelector,
+                            preview,
+                            capture
+                        )
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }, executor)
+                previewView
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // Top cancel button
+        IconButton(
+            onClick = onClose,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .statusBarsPadding()
+                .padding(16.dp)
+                .background(Color.Black.copy(alpha = 0.5f), shape = MaterialTheme.shapes.small)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Cancel Capture",
+                tint = Color.White
+            )
+        }
+
+        // Bottom Controls Overlay
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.4f))
+                .padding(bottom = 48.dp, top = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "Secure Snapshot (Private Container Staging)",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.8f)
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Shutter Button
+            Box(
+                modifier = Modifier
+                    .size(80.dp)
+                    .clickable {
+                        val capture = imageCapture ?: return@clickable
+                        val stagingDir = java.io.File(context.filesDir, "staging")
+                        if (!stagingDir.exists()) {
+                            stagingDir.mkdirs()
+                        }
+                        val photoFile = java.io.File(stagingDir, "camera_capture_${java.util.UUID.randomUUID()}.jpg")
+                        val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+
+                        capture.takePicture(
+                            outputOptions,
+                            ContextCompat.getMainExecutor(context),
+                            object : ImageCapture.OnImageSavedCallback {
+                                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                                    onImageCaptured(Uri.fromFile(photoFile))
+                                }
+
+                                override fun onError(exception: ImageCaptureException) {
+                                    exception.printStackTrace()
+                                    android.widget.Toast.makeText(context, "Ошибка съемки. Попробуйте еще раз.", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        )
+                    }
+                    .border(4.dp, Color.White, shape = CircleShape)
+                    .padding(6.dp)
+                    .background(Color.White, shape = CircleShape)
+            )
+        }
     }
 }

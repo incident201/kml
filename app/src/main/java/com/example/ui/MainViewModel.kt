@@ -26,7 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 
 enum class LockScreenState {
-    IDLE, LOCKING, LOCKED, UNLOCKED_PENDING_EXPORT, MISSING_FILE, DELETE_ORIGINAL_PENDING, PERSISTENCE_ERROR, TIME_SYNC_REQUIRED
+    IDLE, LOCKING, LOCKED, UNLOCKED_PENDING_EXPORT, MISSING_FILE, DELETE_ORIGINAL_PENDING, PERSISTENCE_ERROR, TIME_SYNC_REQUIRED, EMERGENCY_RECOVERY
 }
 
 enum class OriginalStatus {
@@ -44,6 +44,9 @@ class MainViewModel(
 
     private val _timeLeftMs = MutableStateFlow(0L)
     val timeLeftMs: StateFlow<Long> = _timeLeftMs.asStateFlow()
+
+    private val _emergencyTimeLeftMs = MutableStateFlow(0L)
+    val emergencyTimeLeftMs: StateFlow<Long> = _emergencyTimeLeftMs.asStateFlow()
 
     private val _unlockedBitmap = MutableStateFlow<Bitmap?>(null)
     val unlockedBitmap: StateFlow<Bitmap?> = _unlockedBitmap.asStateFlow()
@@ -124,7 +127,26 @@ class MainViewModel(
 
     fun checkCurrentState() {
         viewModelScope.launch {
-            val state = repository.getTransactionState()
+            // Check plain manifest backup in filesDir first, in case database or keys are corrupt/reinstalled
+            val manifest = repository.getRecoveryManifest()
+            val hasValidEncryptedFileForManifest = manifest != null && withContext(Dispatchers.IO) {
+                cryptoManager.recoverableEncryptedFileIsValid(manifest.sha256)
+            }
+            if (hasValidEncryptedFileForManifest) {
+                val state = try { repository.getTransactionState() } catch (e: Exception) { TransactionState.IDLE }
+                if (state == TransactionState.IDLE || state == TransactionState.CLEANED || state == TransactionState.DELETE_ORIGINAL_PENDING) {
+                    val originalUriStr = manifest!!.originalUri
+                    val originalStatus = if (originalUriStr.isNotEmpty()) checkOriginalStatus(Uri.parse(originalUriStr)) else OriginalStatus.DELETED
+                    if (originalStatus == OriginalStatus.DELETED) {
+                        _isStatusUnknown.value = false
+                        _uiState.value = LockScreenState.EMERGENCY_RECOVERY
+                        startEmergencyTimer()
+                        return@launch
+                    }
+                }
+            }
+
+            val state = try { repository.getTransactionState() } catch (e: Exception) { TransactionState.IDLE }
             when (state) {
                 TransactionState.IDLE, TransactionState.CLEANED -> {
                     _isStatusUnknown.value = false
@@ -148,6 +170,7 @@ class MainViewModel(
                         _cleanupFailed.value = true
                         _uiState.value = LockScreenState.IDLE
                     } else {
+                        repository.deleteRecoveryManifest()
                         val prefsCleared = repository.clearLockSession()
                         if (!prefsCleared) {
                             _cleanupFailed.value = true
@@ -250,7 +273,10 @@ class MainViewModel(
                 _uiState.value = LockScreenState.TIME_SYNC_REQUIRED
                 return@launch
             }
-            val calculatedEndTime = currentNtpTime + durationMs
+            var calculatedEndTime = repository.getPlannedEndTimeUtc()
+            if (calculatedEndTime == 0L) {
+                calculatedEndTime = currentNtpTime + durationMs
+            }
             val bootTime = SystemClock.elapsedRealtime()
             
             val saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs) &&
@@ -285,6 +311,8 @@ class MainViewModel(
                 performLockboxFailureCleanup()
                 return@launch
             }
+            val durationMs = durationMinutes * 60 * 1000L
+            val plannedEndTimeUtc = currentNtpTime + durationMs
 
             // Write state, metadata & duration safely
             var writeSuccess = repository.setTransactionState(TransactionState.ENCRYPTING)
@@ -296,6 +324,16 @@ class MainViewModel(
             )
             writeSuccess = writeSuccess && repository.saveOriginalSha256(originalMeta.sha256)
             writeSuccess = writeSuccess && repository.saveLockDuration(durationMinutes)
+            writeSuccess = writeSuccess && repository.savePlannedEndTimeUtc(plannedEndTimeUtc)
+            writeSuccess = writeSuccess && repository.saveRecoveryManifest(
+                originalUri = uri.toString(),
+                displayName = originalMeta.displayName ?: "",
+                mimeType = originalMeta.mimeType ?: "image/jpeg",
+                originalSize = originalMeta.size,
+                sha256 = originalMeta.sha256,
+                endTimeUtc = plannedEndTimeUtc,
+                durationMs = durationMs
+            )
             
             if (!writeSuccess) {
                 performLockboxFailureCleanup()
@@ -337,8 +375,10 @@ class MainViewModel(
                     _canCancelLock.value = false
                     _isStatusUnknown.value = false
                     // 6. Success locking state setup
-                    val durationMs = durationMinutes * 60 * 1000L
-                    val endTimeUtc = currentNtpTime + durationMs
+                    var endTimeUtc = repository.getPlannedEndTimeUtc()
+                    if (endTimeUtc == 0L) {
+                        endTimeUtc = currentNtpTime + durationMs
+                    }
                     val bootTime = SystemClock.elapsedRealtime()
                     
                     val saveSuccess = repository.saveLockSession(endTimeUtc, bootTime, durationMs) &&
@@ -404,8 +444,11 @@ class MainViewModel(
                     }
                     val durationMinutes = repository.getDurationMinutes()
                     val durationMs = durationMinutes * 60 * 1000L
+                    var calculatedEndTime = repository.getPlannedEndTimeUtc()
+                    if (calculatedEndTime == 0L) {
+                        calculatedEndTime = currentNtpTime + durationMs
+                    }
                     val bootTime = SystemClock.elapsedRealtime()
-                    val calculatedEndTime = currentNtpTime + durationMs
                     
                     val saveSuccess = repository.saveLockSession(calculatedEndTime, bootTime, durationMs) &&
                                       repository.setTransactionState(TransactionState.LOCKED)
@@ -483,6 +526,163 @@ class MainViewModel(
         checkCurrentState()
     }
 
+    private var emergencyTimerJob: kotlinx.coroutines.Job? = null
+
+    fun switchToEmergencyRecovery() {
+        if (_uiState.value == LockScreenState.PERSISTENCE_ERROR) {
+            val manifest = repository.getRecoveryManifest()
+            if (manifest != null) {
+                _uiState.value = LockScreenState.EMERGENCY_RECOVERY
+                startEmergencyTimer()
+            }
+        }
+    }
+
+    private fun startEmergencyTimer() {
+        emergencyTimerJob?.cancel()
+        emergencyTimerJob = viewModelScope.launch {
+            while (_uiState.value == LockScreenState.EMERGENCY_RECOVERY) {
+                val manifest = repository.getRecoveryManifest()
+                if (manifest == null) {
+                    _uiState.value = LockScreenState.IDLE
+                    break
+                }
+                val ntpTime = SntpClient.getCurrentTimeUtc()
+                if (ntpTime == null) {
+                    _emergencyTimeLeftMs.value = -1L // indicates sync/offline status in UI
+                } else {
+                    val remaining = manifest.endTimeUtc - ntpTime
+                    if (remaining <= 0) {
+                        _emergencyTimeLeftMs.value = 0L
+                    } else {
+                        _emergencyTimeLeftMs.value = remaining
+                    }
+                }
+                delay(1000)
+            }
+        }
+    }
+
+    suspend fun emergencyExport(): Boolean {
+        return withContext(Dispatchers.IO) {
+            val manifest = repository.getRecoveryManifest() ?: return@withContext false
+            val originalSha256 = manifest.sha256
+            val displayName = manifest.displayName.ifEmpty { "restored_image_${System.currentTimeMillis()}.jpg" }
+            val mimeType = manifest.mimeType.ifEmpty { "image/jpeg" }
+            
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val targetDir = if (mimeType.startsWith("video")) {
+                        android.os.Environment.DIRECTORY_MOVIES
+                    } else {
+                        android.os.Environment.DIRECTORY_PICTURES
+                    }
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, targetDir)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+            }
+
+            val contentResolver = context.contentResolver
+            val targetUri = if (mimeType.startsWith("video")) {
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            } else {
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            }
+
+            var insertedUri: Uri? = null
+            try {
+                insertedUri = contentResolver.insert(targetUri, values)
+                if (insertedUri == null) return@withContext false
+
+                val outputStream = contentResolver.openOutputStream(insertedUri)
+                if (outputStream == null) {
+                    contentResolver.delete(insertedUri, null, null)
+                    return@withContext false
+                }
+
+                // Streaming copy
+                val copySuccess = outputStream.use { out ->
+                    cryptoManager.decryptAndStream(out)
+                }
+
+                if (!copySuccess) {
+                    contentResolver.delete(insertedUri, null, null)
+                    return@withContext false
+                }
+
+                // Verify saved URI SHA-256 and integrity
+                val verified = cryptoManager.verifySavedUriIntegrity(insertedUri, originalSha256)
+                if (verified) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val updateValues = ContentValues().apply {
+                            put(MediaStore.MediaColumns.IS_PENDING, 0)
+                        }
+                        val rowsUpdated = contentResolver.update(insertedUri, updateValues, null, null)
+                        if (rowsUpdated <= 0) {
+                            contentResolver.delete(insertedUri, null, null)
+                            return@withContext false
+                        }
+
+                        // Query verification for IS_PENDING
+                        var pendingStatusVerified = false
+                        try {
+                            contentResolver.query(
+                                insertedUri,
+                                arrayOf(MediaStore.MediaColumns.IS_PENDING),
+                                null,
+                                null,
+                                null
+                            )?.use { cursor ->
+                                if (cursor.moveToFirst()) {
+                                    val isPendingCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.IS_PENDING)
+                                    val isPendingVal = cursor.getInt(isPendingCol)
+                                    if (isPendingVal == 0) {
+                                        pendingStatusVerified = true
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                        if (!pendingStatusVerified) {
+                            contentResolver.delete(insertedUri, null, null)
+                            return@withContext false
+                        }
+
+                        // Final verify after IS_PENDING = 0 to make absolutely sure it's fully readable and perfect
+                        val finalVerified = cryptoManager.verifySavedUriIntegrity(insertedUri, originalSha256)
+                        if (!finalVerified) {
+                            contentResolver.delete(insertedUri, null, null)
+                            return@withContext false
+                        }
+                    }
+                    
+                    // Cleanup everything after successful recovery export
+                    viewModelScope.launch {
+                        _uiState.value = LockScreenState.IDLE
+                        performLockboxFailureCleanup()
+                    }
+                    true
+                } else {
+                    contentResolver.delete(insertedUri, null, null)
+                    false
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                if (insertedUri != null) {
+                    try {
+                        contentResolver.delete(insertedUri, null, null)
+                    } catch (delEx: Exception) {
+                        delEx.printStackTrace()
+                    }
+                }
+                false
+            }
+        }
+    }
+
     suspend fun verifyAndUnlockWithNtp(): Boolean {
         val ntpTime = SntpClient.getCurrentTimeUtc() ?: return false
         val endNtpUtx = repository.getEndTimeUtc()
@@ -522,7 +722,20 @@ class MainViewModel(
 
     private suspend fun performLockboxFailureCleanup() {
         val fileDeleted = withContext(Dispatchers.IO) {
-            cryptoManager.deleteEncryptedFile()
+            cryptoManager.deleteEncryptedFile() &&
+            try {
+                val stagingDir = java.io.File(context.filesDir, "staging")
+                if (stagingDir.exists() && stagingDir.isDirectory) {
+                    stagingDir.listFiles()?.forEach { file ->
+                        file.delete()
+                    }
+                }
+                repository.deleteRecoveryManifest()
+                true
+            } catch (e: Exception) {
+                e.printStackTrace()
+                false
+            }
         }
         if (!fileDeleted) {
             _cleanupFailed.value = true
