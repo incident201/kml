@@ -21,13 +21,14 @@ class ExampleRobolectricTest {
 
     @Before
     fun setUp() {
-        try {
-            val clazz = Class.forName("android.security.keystore.AndroidKeyStoreProvider")
-            val method = clazz.getMethod("install")
-            method.invoke(null)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        val bytes = ByteArray(32) { 7 }
+        val key = javax.crypto.spec.SecretKeySpec(bytes, "AES")
+        CryptoManager.testKeyProvider = { key }
+    }
+
+    @org.junit.After
+    fun tearDown() {
+        CryptoManager.testKeyProvider = null
     }
 
     @Test

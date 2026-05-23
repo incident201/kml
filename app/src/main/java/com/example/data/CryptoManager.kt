@@ -41,46 +41,32 @@ class CryptoManager(private val context: Context) {
     private val KEY_ALIAS = "keep_me_locked_aes_key"
     private val repository by lazy { LockRepository(context) }
 
-    private fun getOrCreateTransientTestKey(): SecretKey {
-        val key = transientTestKey
-        if (key != null) return key
-        val bytes = ByteArray(32)
-        java.security.SecureRandom().nextBytes(bytes)
-        val newKey = javax.crypto.spec.SecretKeySpec(bytes, "AES")
-        transientTestKey = newKey
-        return newKey
-    }
-
     private fun getOrCreateKeystoreKey(): SecretKey {
-        return try {
-            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
-            keyStore.load(null)
+        testKeyProvider?.let { return it() }
 
-            val existingKey = keyStore.getKey(KEY_ALIAS, null)
-            if (existingKey is SecretKey) return existingKey
+        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
+        keyStore.load(null)
 
-            val keyGenerator = KeyGenerator.getInstance(
-                KeyProperties.KEY_ALGORITHM_AES,
-                ANDROID_KEYSTORE
-            )
+        val existingKey = keyStore.getKey(KEY_ALIAS, null)
+        if (existingKey is SecretKey) return existingKey
 
-            val spec = KeyGenParameterSpec.Builder(
-                KEY_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            )
-                .setKeySize(256)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setRandomizedEncryptionRequired(true)
-                .build()
+        val keyGenerator = KeyGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_AES,
+            ANDROID_KEYSTORE
+        )
 
-            keyGenerator.init(spec)
-            keyGenerator.generateKey()
-        } catch (e: Exception) {
-            // Fall back to a transient in-memory key for JVM/Robolectric test environments 
-            // where the actual hardware AndroidKeyStore provider is unavailable.
-            getOrCreateTransientTestKey()
-        }
+        val spec = KeyGenParameterSpec.Builder(
+            KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setKeySize(256)
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setRandomizedEncryptionRequired(true)
+            .build()
+
+        keyGenerator.init(spec)
+        return keyGenerator.generateKey()
     }
 
     private fun calculateSha256AndSize(uri: Uri): Pair<String, Long>? {
@@ -496,6 +482,6 @@ class CryptoManager(private val context: Context) {
 
     companion object {
         var lastVerifyException: Throwable? = null
-        var transientTestKey: SecretKey? = null
+        var testKeyProvider: (() -> SecretKey)? = null
     }
 }
