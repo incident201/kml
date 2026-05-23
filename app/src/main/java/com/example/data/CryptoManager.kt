@@ -66,6 +66,7 @@ class CryptoManager(private val context: Context) {
                 tmp.delete()
                 throw IllegalStateException("Failed to commit lockbox key file")
             }
+            syncParentDirectory(keyFile)
         } catch (e: Exception) {
             if (tmp.exists()) tmp.delete()
             throw e
@@ -192,6 +193,7 @@ class CryptoManager(private val context: Context) {
                 return false
             }
             if (lockFileTmp.renameTo(lockFile)) {
+                syncParentDirectory(lockFile)
                 val verified = verifyFileIntegrity(lockFile, expectedSha256)
                 if (verified) {
                     true
@@ -440,20 +442,35 @@ class CryptoManager(private val context: Context) {
     fun deleteEncryptedFile(): Boolean {
         var success = true
         if (lockFile.exists()) {
-            success = lockFile.delete() && !lockFile.exists()
+            val deleted = lockFile.delete()
+            if (!deleted || lockFile.exists()) success = false
         }
         val lockFileTmp = File(context.filesDir, "locked_image.enc.tmp")
         if (lockFileTmp.exists()) {
-            success = lockFileTmp.delete() && !lockFileTmp.exists() && success
+            val deleted = lockFileTmp.delete()
+            if (!deleted || lockFileTmp.exists()) success = false
         }
         if (keyFile.exists()) {
-            success = keyFile.delete() && !keyFile.exists() && success
+            val deleted = keyFile.delete()
+            if (!deleted || keyFile.exists()) success = false
         }
         val keyFileTmp = File(context.filesDir, "lockbox.key.tmp")
         if (keyFileTmp.exists()) {
-            success = keyFileTmp.delete() && !keyFileTmp.exists() && success
+            val deleted = keyFileTmp.delete()
+            if (!deleted || keyFileTmp.exists()) success = false
         }
         return success
+    }
+
+    private fun syncParentDirectory(file: File) {
+        try {
+            val parent = file.parentFile ?: return
+            val fd = android.system.Os.open(parent.absolutePath, android.system.OsConstants.O_RDONLY, 0)
+            android.system.Os.fsync(fd)
+            android.system.Os.close(fd)
+        } catch (e: Throwable) {
+            e.printStackTrace()
+        }
     }
 
     companion object {

@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.camera.core.CameraSelector
@@ -63,6 +64,37 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
     val selectedUri = remember(selectedUriStr) { selectedUriStr?.let { Uri.parse(it) } }
 
     var showCameraView by remember { mutableStateOf(false) }
+
+    // Request notification permissions for Android 13+ to post alarm alerts
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { /* Permission handled */ }
+    )
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val hasNotificationPermission = ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!hasNotificationPermission) {
+                notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
+    val selectedBitmap = remember(selectedUri) {
+        selectedUri?.path?.let { path ->
+            try {
+                val options = android.graphics.BitmapFactory.Options().apply {
+                    inSampleSize = 2
+                }
+                android.graphics.BitmapFactory.decodeFile(path, options)
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -227,19 +259,64 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                         cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
                                     }
                                 },
-                                modifier = Modifier.fillMaxWidth().height(56.dp)
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(56.dp)
+                                    .testTag("make_snapshot_button")
                             ) {
                                 CameraIcon()
                                 Spacer(Modifier.width(8.dp))
                                 Text("Сделать снимок")
                             }
                         } else {
+                        if (selectedBitmap != null) {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(180.dp)
+                                    .padding(vertical = 8.dp)
+                                    .testTag("selected_image_preview_card"),
+                                shape = MaterialTheme.shapes.large,
+                                border = androidx.compose.foundation.BorderStroke(
+                                    1.dp,
+                                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                                )
+                            ) {
+                                Box(modifier = Modifier.fillMaxSize()) {
+                                    Image(
+                                        bitmap = selectedBitmap.asImageBitmap(),
+                                        contentDescription = "Selected Picture Preview",
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(
+                                                androidx.compose.ui.graphics.Brush.verticalGradient(
+                                                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.5f))
+                                                )
+                                            )
+                                    )
+                                    Text(
+                                        text = "Выбранный снимок для блокировки",
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        modifier = Modifier
+                                            .align(Alignment.BottomStart)
+                                            .padding(12.dp)
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(8.dp))
+                        }
+
                         Text(
                             text = "Выберите время блокировки",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.primary
                         )
-                        Spacer(Modifier.height(16.dp))
+                        Spacer(Modifier.height(12.dp))
 
                         Card(
                             modifier = Modifier
@@ -360,7 +437,10 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                 }
                             },
                             enabled = !isDeleteInProgress && durationMinutes > 0,
-                            modifier = Modifier.fillMaxWidth().height(56.dp)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(56.dp)
+                                .testTag("lock_confirm_button")
                         ) {
                             Icon(Icons.Default.Lock, contentDescription = null)
                             Spacer(Modifier.width(8.dp))
@@ -376,7 +456,10 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                         onDeleteOriginal(Uri.parse(currentUriStr))
                                     }
                                 }
-                            }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("cancel_lock_button")
                         ) {
                             Text("Отмена")
                         }
@@ -541,7 +624,10 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                             }
                         },
                         enabled = !isSaving,
-                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp)
+                            .testTag("save_to_gallery_button")
                     ) {
                         if (isSaving) {
                             CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Color.White)

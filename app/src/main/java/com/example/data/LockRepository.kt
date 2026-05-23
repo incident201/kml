@@ -106,6 +106,7 @@ class LockRepository(private val context: Context) {
                 return false
             }
             if (tmpFile.renameTo(file)) {
+                syncParentDirectory(file)
                 true
             } else {
                 tmpFile.delete()
@@ -117,6 +118,17 @@ class LockRepository(private val context: Context) {
                 tmpFile.delete()
             }
             false
+        }
+    }
+
+    private fun syncParentDirectory(file: java.io.File) {
+        try {
+            val parent = file.parentFile ?: return
+            val fd = android.system.Os.open(parent.absolutePath, android.system.OsConstants.O_RDONLY, 0)
+            android.system.Os.fsync(fd)
+            android.system.Os.close(fd)
+        } catch (e: Throwable) {
+            e.printStackTrace()
         }
     }
 
