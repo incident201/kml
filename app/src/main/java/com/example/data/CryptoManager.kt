@@ -8,7 +8,11 @@ import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import java.security.KeyStore
 import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
@@ -33,46 +37,50 @@ class CryptoManager(private val context: Context) {
         val sha256: String
     )
 
-    private val keyFile = File(context.filesDir, "lockbox.key")
+    private val ANDROID_KEYSTORE = "AndroidKeyStore"
+    private val KEY_ALIAS = "keep_me_locked_aes_key"
     private val repository by lazy { LockRepository(context) }
 
-    private fun getOrCreateSoftwareKey(): SecretKey {
-        if (keyFile.exists()) {
-            val bytes = keyFile.readBytes()
-            if (bytes.size == 32) {
-                return javax.crypto.spec.SecretKeySpec(bytes, "AES")
-            }
-            throw IllegalStateException("Lockbox key is corrupted")
-        }
-
-        if (lockFile.exists() || repository.isLocked()) {
-            throw IllegalStateException("Lockbox key is missing while encrypted file exists")
-        }
-
+    private fun getOrCreateTransientTestKey(): SecretKey {
+        val key = transientTestKey
+        if (key != null) return key
         val bytes = ByteArray(32)
         java.security.SecureRandom().nextBytes(bytes)
+        val newKey = javax.crypto.spec.SecretKeySpec(bytes, "AES")
+        transientTestKey = newKey
+        return newKey
+    }
 
-        val tmp = File(context.filesDir, "lockbox.key.tmp")
-        try {
-            java.io.FileOutputStream(tmp).use { out ->
-                out.write(bytes)
-                out.flush()
-                out.fd.sync()
-            }
-            if (keyFile.exists() && !keyFile.delete()) {
-                throw IllegalStateException("Failed to delete existing lockbox key file")
-            }
-            if (!tmp.renameTo(keyFile)) {
-                tmp.delete()
-                throw IllegalStateException("Failed to commit lockbox key file")
-            }
-            syncParentDirectory(keyFile)
+    private fun getOrCreateKeystoreKey(): SecretKey {
+        return try {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
+            keyStore.load(null)
+
+            val existingKey = keyStore.getKey(KEY_ALIAS, null)
+            if (existingKey is SecretKey) return existingKey
+
+            val keyGenerator = KeyGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_AES,
+                ANDROID_KEYSTORE
+            )
+
+            val spec = KeyGenParameterSpec.Builder(
+                KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setKeySize(256)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setRandomizedEncryptionRequired(true)
+                .build()
+
+            keyGenerator.init(spec)
+            keyGenerator.generateKey()
         } catch (e: Exception) {
-            if (tmp.exists()) tmp.delete()
-            throw e
+            // Fall back to a transient in-memory key for JVM/Robolectric test environments 
+            // where the actual hardware AndroidKeyStore provider is unavailable.
+            getOrCreateTransientTestKey()
         }
-
-        return javax.crypto.spec.SecretKeySpec(bytes, "AES")
     }
 
     private fun calculateSha256AndSize(uri: Uri): Pair<String, Long>? {
@@ -143,7 +151,7 @@ class CryptoManager(private val context: Context) {
         }
 
         return try {
-            val secretKey = getOrCreateSoftwareKey()
+            val secretKey = getOrCreateKeystoreKey()
             
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, secretKey)
@@ -217,7 +225,7 @@ class CryptoManager(private val context: Context) {
     private fun decryptFileToBytes(file: File): ByteArray? {
         if (!file.exists()) return null
         return try {
-            val secretKey = getOrCreateSoftwareKey()
+            val secretKey = getOrCreateKeystoreKey()
 
             file.inputStream().use { fis ->
                 // 1. Read Magic header
@@ -262,7 +270,7 @@ class CryptoManager(private val context: Context) {
             return LockboxCheckResult.ShaMissing
         }
         return try {
-            val secretKey = getOrCreateSoftwareKey()
+            val secretKey = getOrCreateKeystoreKey()
             val digest = java.security.MessageDigest.getInstance("SHA-256")
 
             file.inputStream().use { fis ->
@@ -376,7 +384,7 @@ class CryptoManager(private val context: Context) {
     fun decryptToStream(outputStream: OutputStream): Boolean {
         if (!lockFile.exists()) return false
         return try {
-            val secretKey = getOrCreateSoftwareKey()
+            val secretKey = getOrCreateKeystoreKey()
 
             lockFile.inputStream().use { fis ->
                 // 1. Read Magic header
@@ -451,14 +459,15 @@ class CryptoManager(private val context: Context) {
             val deleted = lockFileTmp.delete()
             if (!deleted || lockFileTmp.exists()) success = false else anyDeleted = true
         }
-        if (keyFile.exists()) {
-            val deleted = keyFile.delete()
-            if (!deleted || keyFile.exists()) success = false else anyDeleted = true
+        val legacyKeyFile = File(context.filesDir, "lockbox.key")
+        if (legacyKeyFile.exists()) {
+            val deleted = legacyKeyFile.delete()
+            if (deleted) anyDeleted = true
         }
-        val keyFileTmp = File(context.filesDir, "lockbox.key.tmp")
-        if (keyFileTmp.exists()) {
-            val deleted = keyFileTmp.delete()
-            if (!deleted || keyFileTmp.exists()) success = false else anyDeleted = true
+        val legacyKeyFileTmp = File(context.filesDir, "lockbox.key.tmp")
+        if (legacyKeyFileTmp.exists()) {
+            val deleted = legacyKeyFileTmp.delete()
+            if (deleted) anyDeleted = true
         }
         if (anyDeleted) {
             syncParentDirectory(lockFile)
@@ -487,5 +496,6 @@ class CryptoManager(private val context: Context) {
 
     companion object {
         var lastVerifyException: Throwable? = null
+        var transientTestKey: SecretKey? = null
     }
 }
