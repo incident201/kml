@@ -9,6 +9,7 @@ enum class TransactionState {
     ENCRYPTING,
     ENCRYPTED_VERIFIED,
     DELETE_ORIGINAL_PENDING,
+    ORIGINAL_DELETED_VERIFIED,
     LOCKED,
     UNLOCKED_PENDING_EXPORT,
     RESTORED_VERIFIED,
@@ -82,8 +83,9 @@ class LockRepository(private val context: Context) {
         endTimeUtc: Long,
         durationMs: Long
     ): Boolean {
+        val file = java.io.File(context.filesDir, "recovery_manifest.txt")
+        val tmpFile = java.io.File(context.filesDir, "recovery_manifest.txt.tmp")
         return try {
-            val file = java.io.File(context.filesDir, "recovery_manifest.txt")
             val content = """
                 original_uri=$originalUri
                 original_display_name=$displayName
@@ -93,10 +95,27 @@ class LockRepository(private val context: Context) {
                 end_time_utc=$endTimeUtc
                 duration_ms=$durationMs
             """.trimIndent()
-            file.writeText(content)
-            true
+            
+            java.io.FileOutputStream(tmpFile).use { fos ->
+                fos.write(content.toByteArray(Charsets.UTF_8))
+                fos.flush()
+                fos.fd.sync()
+            }
+            if (file.exists() && !file.delete()) {
+                tmpFile.delete()
+                return false
+            }
+            if (tmpFile.renameTo(file)) {
+                true
+            } else {
+                tmpFile.delete()
+                false
+            }
         } catch (e: Exception) {
             e.printStackTrace()
+            if (tmpFile.exists()) {
+                tmpFile.delete()
+            }
             false
         }
     }
@@ -140,7 +159,7 @@ class LockRepository(private val context: Context) {
                     }
                 }
             }
-            if (sha.isNotEmpty()) {
+            if (sha.isNotEmpty() && end > 0 && dur > 0 && name.isNotEmpty() && mime.isNotEmpty()) {
                 ManifestData(uri, name, mime, size, sha, end, dur)
             } else {
                 null
