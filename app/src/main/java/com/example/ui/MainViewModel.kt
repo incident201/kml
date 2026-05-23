@@ -66,6 +66,9 @@ class MainViewModel(
     private val _lastErrorDetails = MutableStateFlow<String?>(null)
     val lastErrorDetails: StateFlow<String?> = _lastErrorDetails.asStateFlow()
 
+    private val _pendingOriginalUri = MutableStateFlow<String?>(null)
+    val pendingOriginalUri: StateFlow<String?> = _pendingOriginalUri.asStateFlow()
+
     private var timerJob: kotlinx.coroutines.Job? = null
 
     init {
@@ -172,6 +175,11 @@ class MainViewModel(
 
             val originalUriStr = repository.getOriginalUri() ?: manifest?.originalUri ?: ""
             val originalStatus = if (originalUriStr.isNotEmpty()) checkOriginalStatus(Uri.parse(originalUriStr)) else OriginalStatus.DELETED
+            if (originalStatus == OriginalStatus.EXISTS) {
+                _pendingOriginalUri.value = originalUriStr
+            } else {
+                _pendingOriginalUri.value = null
+            }
 
             when (state) {
                 TransactionState.IDLE, TransactionState.CLEANED -> {
@@ -191,6 +199,18 @@ class MainViewModel(
                         _uiState.value = LockScreenState.IDLE
                     }
                 }
+                TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE -> {
+                    _isStatusUnknown.value = false
+                    if (originalStatus == OriginalStatus.EXISTS) {
+                        _lastErrorDetails.value = _lastErrorDetails.value ?: "Блокировка не завершена: защищённая копия отсутствует, оригинальный staging-файл сохранён."
+                        cleanupCryptoArtifactsOnly()
+                        _canCancelLock.value = true
+                        _uiState.value = LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE
+                    } else {
+                        _lastErrorDetails.value = "Критическая ошибка: Оригинальный файл отсутствует."
+                        _uiState.value = LockScreenState.MISSING_FILE
+                    }
+                }
                 TransactionState.ENCRYPTING -> {
                     _isStatusUnknown.value = false
                     if (originalStatus == OriginalStatus.EXISTS) {
@@ -201,7 +221,8 @@ class MainViewModel(
                             _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
                         } else {
                             _lastErrorDetails.value = "Блокировка не завершена, оригинальный staging-файл сохранён."
-                            cleanupLockboxArtifactsOnly()
+                            cleanupCryptoArtifactsOnly()
+                            repository.setTransactionState(TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE)
                             _canCancelLock.value = true
                             _uiState.value = LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE
                         }
@@ -231,7 +252,8 @@ class MainViewModel(
                             _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
                         } else {
                             _lastErrorDetails.value = "Блокировка не завершена: защищённая копия отсутствует, оригинальный staging-файл сохранён."
-                            cleanupLockboxArtifactsOnly()
+                            cleanupCryptoArtifactsOnly()
+                            repository.setTransactionState(TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE)
                             _canCancelLock.value = true
                             _uiState.value = LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE
                         }
@@ -264,7 +286,8 @@ class MainViewModel(
                             }
                         } else {
                             _lastErrorDetails.value = "Блокировка не завершена: защищённая копия отсутствует, оригинальный staging-файл сохранён."
-                            cleanupLockboxArtifactsOnly()
+                            cleanupCryptoArtifactsOnly()
+                            repository.setTransactionState(TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE)
                             _canCancelLock.value = true
                             _uiState.value = LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE
                         }
@@ -350,7 +373,7 @@ class MainViewModel(
             require(isInStagingDir(file)) { "File is not in the staging directory" }
         } catch (e: Exception) {
             _lastErrorDetails.value = "Неверный URI исходного файла: ${e.message}"
-            cleanupLockboxArtifactsOnly()
+            cleanupCryptoArtifactsOnly()
             _uiState.value = LockScreenState.IDLE
             return
         }
@@ -361,7 +384,7 @@ class MainViewModel(
         }
         if (originalMeta == null) {
             _lastErrorDetails.value = "Не удалось прочитать метаданные исходного файла"
-            cleanupLockboxArtifactsOnly()
+            cleanupCryptoArtifactsOnly()
             _uiState.value = LockScreenState.IDLE
             return
         }
@@ -370,12 +393,15 @@ class MainViewModel(
         val currentNtpTime = SntpClient.getCurrentTimeUtc()
         if (currentNtpTime == null) {
             _lastErrorDetails.value = "Не удалось проверить время по NTP до начала блокировки. Пожалуйста, проверьте подключение к сети и попробуйте заблокировать ещё раз."
-            cleanupLockboxArtifactsOnly()
+            cleanupCryptoArtifactsOnly()
             _uiState.value = LockScreenState.IDLE
             return
         }
         val durationMs = durationMinutes * 60 * 1000L
         val plannedEndTimeUtc = currentNtpTime + durationMs
+
+        // Expose pending original URI for UI
+        _pendingOriginalUri.value = uri.toString()
 
         // Write state, metadata & duration safely
         var writeSuccess = repository.setTransactionState(TransactionState.ENCRYPTING)
@@ -400,8 +426,10 @@ class MainViewModel(
         
         if (!writeSuccess) {
             _lastErrorDetails.value = "Ошибка сохранения сессии при подготовке ENCRYPTING"
-            cleanupLockboxArtifactsOnly()
-            _uiState.value = LockScreenState.IDLE
+            cleanupCryptoArtifactsOnly()
+            repository.setTransactionState(TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE)
+            _canCancelLock.value = true
+            _uiState.value = LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE
             return
         }
 
@@ -411,15 +439,18 @@ class MainViewModel(
         }
         if (!encryptSuccess) {
             _lastErrorDetails.value = "Ошибка шифрования или верификации зашифрованного файла"
-            cleanupLockboxArtifactsOnly()
-            _uiState.value = LockScreenState.IDLE
+            cleanupCryptoArtifactsOnly()
+            repository.setTransactionState(TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE)
+            _canCancelLock.value = true
+            _uiState.value = LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE
             return
         }
 
         // 3. Document verified encrypted state
         if (!repository.setTransactionState(TransactionState.ENCRYPTED_VERIFIED)) {
             _lastErrorDetails.value = "Ошибка при переходе в ENCRYPTED_VERIFIED"
-            cleanupLockboxArtifactsOnly()
+            cleanupCryptoArtifactsOnly()
+            repository.setTransactionState(TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE)
             _canCancelLock.value = true
             _uiState.value = LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE
             return
@@ -428,7 +459,8 @@ class MainViewModel(
         // 4. Deletion flow transition
         if (!repository.setTransactionState(TransactionState.DELETE_ORIGINAL_PENDING)) {
             _lastErrorDetails.value = "Ошибка при переходе в DELETE_ORIGINAL_PENDING"
-            cleanupLockboxArtifactsOnly()
+            cleanupCryptoArtifactsOnly()
+            repository.setTransactionState(TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE)
             _canCancelLock.value = true
             _uiState.value = LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE
             return
@@ -447,6 +479,7 @@ class MainViewModel(
         // 6. Post-deletion hard verification!
         val status = checkOriginalStatus(uri)
         if (status == OriginalStatus.DELETED) {
+            _pendingOriginalUri.value = null
             if (!repository.setTransactionState(TransactionState.ORIGINAL_DELETED_VERIFIED)) {
                 _lastErrorDetails.value = "Ошибка при сохранении состояния ORIGINAL_DELETED_VERIFIED"
                 _uiState.value = LockScreenState.PERSISTENCE_ERROR
@@ -782,7 +815,17 @@ class MainViewModel(
         }
     }
 
+    private suspend fun cleanupCryptoArtifactsOnly(): Boolean {
+        return withContext(Dispatchers.IO) {
+            val encryptedDeleted = cryptoManager.deleteEncryptedFile()
+            val manifestDeleted = repository.deleteRecoveryManifest()
+            _isStatusUnknown.value = false
+            encryptedDeleted && manifestDeleted
+        }
+    }
+
     private suspend fun performLockboxFailureCleanup() {
+        _pendingOriginalUri.value = null
         val fileDeleted = withContext(Dispatchers.IO) {
             val lockboxCleaned = cleanupLockboxArtifactsOnly()
             
@@ -1014,6 +1057,7 @@ class MainViewModel(
         viewModelScope.launch {
             if ((_uiState.value == LockScreenState.DELETE_ORIGINAL_PENDING || _uiState.value == LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE) && _canCancelLock.value) {
                 cleanupLockboxArtifactsOnly()
+                _pendingOriginalUri.value = null
                 _uiState.value = LockScreenState.IDLE
             }
         }

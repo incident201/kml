@@ -13,7 +13,8 @@ enum class TransactionState {
     LOCKED,
     UNLOCKED_PENDING_EXPORT,
     RESTORED_VERIFIED,
-    CLEANED
+    CLEANED,
+    LOCK_FAILED_ORIGINAL_AVAILABLE
 }
 
 class LockRepository(private val context: Context) {

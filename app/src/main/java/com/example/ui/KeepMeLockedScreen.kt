@@ -58,10 +58,17 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
     val cleanupFailed by viewModel.cleanupFailed.collectAsState()
     val isUnlockStateSaved by viewModel.isUnlockStateSaved.collectAsState()
     val lastErrorDetails by viewModel.lastErrorDetails.collectAsState()
+    val pendingOriginalUriStr by viewModel.pendingOriginalUri.collectAsState()
 
     val context = LocalContext.current
     var selectedUriStr by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
     val selectedUri = remember(selectedUriStr) { selectedUriStr?.let { Uri.parse(it) } }
+
+    LaunchedEffect(pendingOriginalUriStr) {
+        if (pendingOriginalUriStr != null) {
+            selectedUriStr = pendingOriginalUriStr
+        }
+    }
 
     var showCameraView by remember { mutableStateOf(false) }
 
@@ -975,6 +982,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         OutlinedButton(
                             onClick = {
                                 viewModel.cancelPendingLock()
+                                selectedUriStr = null
                             },
                             modifier = Modifier.fillMaxWidth().height(56.dp)
                         ) {
