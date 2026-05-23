@@ -726,11 +726,11 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         Spacer(modifier = Modifier.height(16.dp))
                         OutlinedButton(
                             onClick = {
-                                viewModel.cancelPendingLock()
+                                viewModel.returnToPendingOriginal()
                             },
                             modifier = Modifier.fillMaxWidth().height(56.dp)
                         ) {
-                            Text("Отменить блокировку (файл цел)")
+                            Text("Вернуться к снимку")
                         }
                     }
                 }
@@ -981,12 +981,11 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         Spacer(modifier = Modifier.height(16.dp))
                         OutlinedButton(
                             onClick = {
-                                viewModel.cancelPendingLock()
-                                selectedUriStr = null
+                                viewModel.returnToPendingOriginal()
                             },
                             modifier = Modifier.fillMaxWidth().height(56.dp)
                         ) {
-                            Text("Отмена (файл цел)")
+                            Text("Вернуться к снимку")
                         }
                     }
                 }
