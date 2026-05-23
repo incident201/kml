@@ -4,15 +4,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
-import java.security.KeyStore
 import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
@@ -26,8 +22,6 @@ sealed class LockboxCheckResult {
 
 class CryptoManager(private val context: Context) {
 
-    private val KEY_ALIAS = "kml_lockbox_aes_v1"
-    private val ANDROID_KEYSTORE = "AndroidKeyStore"
     private val TRANSFORMATION = "AES/GCM/NoPadding"
 
     private val lockFile = File(context.filesDir, "locked_image.enc")
@@ -39,33 +33,37 @@ class CryptoManager(private val context: Context) {
         val sha256: String
     )
 
-    private fun getSecretKey(createNewIfNeeded: Boolean): SecretKey? {
-        return try {
-            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-            if (keyStore.containsAlias(KEY_ALIAS)) {
-                val entry = keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
-                entry?.secretKey
-            } else if (createNewIfNeeded) {
-                val keyGenerator = KeyGenerator.getInstance(
-                    KeyProperties.KEY_ALGORITHM_AES,
-                    ANDROID_KEYSTORE
-                )
-                val spec = KeyGenParameterSpec.Builder(
-                    KEY_ALIAS,
-                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-                )
-                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                    .build()
-                keyGenerator.init(spec)
-                keyGenerator.generateKey()
-            } else {
-                null
+    private val keyFile = File(context.filesDir, "lockbox.key")
+
+    private fun getOrCreateSoftwareKey(): SecretKey {
+        if (keyFile.exists()) {
+            val bytes = keyFile.readBytes()
+            if (bytes.size == 32) {
+                return javax.crypto.spec.SecretKeySpec(bytes, "AES")
+            }
+        }
+
+        val bytes = ByteArray(32)
+        java.security.SecureRandom().nextBytes(bytes)
+
+        val tmp = File(context.filesDir, "lockbox.key.tmp")
+        try {
+            java.io.FileOutputStream(tmp).use { out ->
+                out.write(bytes)
+                out.flush()
+                out.fd.sync()
+            }
+            if (keyFile.exists()) keyFile.delete()
+            if (!tmp.renameTo(keyFile)) {
+                tmp.delete()
+                throw IllegalStateException("Failed to commit lockbox key file")
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            null
+            if (tmp.exists()) tmp.delete()
         }
+
+        return javax.crypto.spec.SecretKeySpec(bytes, "AES")
     }
 
     private fun calculateSha256AndSize(uri: Uri): Pair<String, Long>? {
@@ -139,7 +137,7 @@ class CryptoManager(private val context: Context) {
         }
 
         return try {
-            val secretKey = getSecretKey(createNewIfNeeded = true) ?: return false
+            val secretKey = getOrCreateSoftwareKey()
             
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, secretKey)
@@ -195,8 +193,7 @@ class CryptoManager(private val context: Context) {
     private fun decryptFileToBytes(file: File): ByteArray? {
         if (!file.exists()) return null
         return try {
-            val secretKey = getSecretKey(createNewIfNeeded = false) 
-                ?: throw IllegalStateException("Key $KEY_ALIAS not found in Android Keystore")
+            val secretKey = getOrCreateSoftwareKey()
 
             file.inputStream().use { fis ->
                 // 1. Read Magic header

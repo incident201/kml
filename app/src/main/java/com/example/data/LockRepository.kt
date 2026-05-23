@@ -3,9 +3,6 @@ package com.example.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
-import com.example.util.SecurityKeyProvider
 
 enum class TransactionState {
     IDLE,
@@ -21,13 +18,9 @@ enum class TransactionState {
 class LockRepository(private val context: Context) {
 
     private val sharedPreferences: SharedPreferences by lazy {
-        val masterKey = SecurityKeyProvider.getMasterKey(context)
-        EncryptedSharedPreferences.create(
-            context,
+        context.applicationContext.getSharedPreferences(
             "lock_prefs",
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            Context.MODE_PRIVATE
         )
     }
 

@@ -132,8 +132,14 @@ class MainViewModel(
         viewModelScope.launch {
             // Check plain manifest backup in filesDir first, in case database or keys are corrupt/reinstalled
             val manifest = repository.getRecoveryManifest()
-            val hasValidEncryptedFileForManifest = manifest != null && withContext(Dispatchers.IO) {
-                cryptoManager.recoverableEncryptedFileIsValid(manifest.sha256)
+            var hasValidEncryptedFileForManifest = manifest != null && withContext(Dispatchers.IO) {
+                cryptoManager.recoverableEncryptedFileExists()
+            }
+            if (manifest != null && !hasValidEncryptedFileForManifest) {
+                val repaired = tryRepairLockboxFromStaging(manifest.sha256)
+                if (repaired) {
+                    hasValidEncryptedFileForManifest = true
+                }
             }
             if (hasValidEncryptedFileForManifest) {
                 val state = try { repository.getTransactionState() } catch (e: Exception) { TransactionState.IDLE }
@@ -187,11 +193,16 @@ class MainViewModel(
                 }
                 TransactionState.DELETE_ORIGINAL_PENDING -> {
                     val originalSha256 = repository.getOriginalSha256() ?: ""
-                    val checkResult = withContext(Dispatchers.IO) {
-                        cryptoManager.getLockboxCheckResult(originalSha256)
+                    var hasLockFile = withContext(Dispatchers.IO) {
+                        cryptoManager.recoverableEncryptedFileExists()
                     }
-                    val hasRecoverable = checkResult is com.example.data.LockboxCheckResult.Ok
-                    if (!hasRecoverable) {
+                    if (!hasLockFile) {
+                        val repaired = tryRepairLockboxFromStaging(originalSha256)
+                        if (repaired) {
+                            hasLockFile = true
+                        }
+                    }
+                    if (!hasLockFile) {
                         val originalUriStr = repository.getOriginalUri()
                         val originalStatus = originalUriStr?.let { checkOriginalStatus(Uri.parse(it)) }
 
@@ -200,14 +211,10 @@ class MainViewModel(
                             performLockboxFailureCleanup()
                         } else {
                             // Original not confirmed exists, but encrypted copy is gone or invalid. Critical loss/missing error.
-                            _lastErrorDetails.value = formatCheckResultError(checkResult)
+                            _lastErrorDetails.value = "Критическая ошибка: Файл локбокса (.enc) полностью отсутствует на диске."
                             _uiState.value = LockScreenState.MISSING_FILE
                         }
                     } else {
-                        // Cold start survived, successfully read. Clean up original staging if any.
-                        withContext(Dispatchers.IO) {
-                            clearStagingDir()
-                        }
                         val originalUriStr = repository.getOriginalUri()
                         if (originalUriStr != null) {
                             val originalUri = Uri.parse(originalUriStr)
@@ -236,19 +243,23 @@ class MainViewModel(
                     }
                 }
                 TransactionState.LOCKED -> {
-                    val originalSha256 = repository.getOriginalSha256() ?: ""
-                    val checkResult = withContext(Dispatchers.IO) {
-                        cryptoManager.getLockboxCheckResult(originalSha256)
+                    val originalSha256 = repository.getOriginalSha256()
+                    var hasLockFile = withContext(Dispatchers.IO) {
+                        cryptoManager.recoverableEncryptedFileExists()
                     }
-                    val hasRecoverable = checkResult is com.example.data.LockboxCheckResult.Ok
-                    if (!hasRecoverable) {
-                        _lastErrorDetails.value = formatCheckResultError(checkResult)
+                    if (!hasLockFile && !originalSha256.isNullOrBlank()) {
+                        val repaired = tryRepairLockboxFromStaging(originalSha256)
+                        if (repaired) {
+                            hasLockFile = true
+                        }
+                    }
+
+                    if (originalSha256.isNullOrBlank() || !hasLockFile) {
+                        _lastErrorDetails.value =
+                            "LOCKED state is present, but required session data is missing. " +
+                            "shaPresent=${!originalSha256.isNullOrBlank()}, lockFileExists=$hasLockFile"
                         _uiState.value = LockScreenState.MISSING_FILE
                     } else {
-                        // Cold start survived, successfully read. Clean up original staging if any.
-                        withContext(Dispatchers.IO) {
-                            clearStagingDir()
-                        }
                         val currentBootTime = SystemClock.elapsedRealtime()
                         val bootTimeAtLock = repository.getBootTimeAtLock()
                         if (currentBootTime < bootTimeAtLock) {
@@ -261,18 +272,19 @@ class MainViewModel(
                 }
                 TransactionState.UNLOCKED_PENDING_EXPORT -> {
                     val originalSha256 = repository.getOriginalSha256() ?: ""
-                    val checkResult = withContext(Dispatchers.IO) {
-                        cryptoManager.getLockboxCheckResult(originalSha256)
+                    var hasLockFile = withContext(Dispatchers.IO) {
+                        cryptoManager.recoverableEncryptedFileExists()
                     }
-                    val hasRecoverable = checkResult is com.example.data.LockboxCheckResult.Ok
-                    if (!hasRecoverable) {
-                        _lastErrorDetails.value = formatCheckResultError(checkResult)
+                    if (!hasLockFile) {
+                        val repaired = tryRepairLockboxFromStaging(originalSha256)
+                        if (repaired) {
+                            hasLockFile = true
+                        }
+                    }
+                    if (!hasLockFile) {
+                        _lastErrorDetails.value = "Критическая ошибка: Файл локбокса (.enc) полностью отсутствует на диске."
                         _uiState.value = LockScreenState.MISSING_FILE
                     } else {
-                        // Cold start survived, successfully read. Clean up original staging if any.
-                        withContext(Dispatchers.IO) {
-                            clearStagingDir()
-                        }
                         _isStatusUnknown.value = false
                         _uiState.value = LockScreenState.UNLOCKED_PENDING_EXPORT
                         loadDecryptedBitmap()
@@ -440,7 +452,13 @@ class MainViewModel(
             val checkResult = withContext(Dispatchers.IO) {
                 cryptoManager.getLockboxCheckResult(originalSha256)
             }
-            val hasRecoverable = checkResult is com.example.data.LockboxCheckResult.Ok
+            var hasRecoverable = checkResult is com.example.data.LockboxCheckResult.Ok
+            if (!hasRecoverable) {
+                val repaired = tryRepairLockboxFromStaging(originalSha256)
+                if (repaired) {
+                    hasRecoverable = true
+                }
+            }
             if (!hasRecoverable) {
                 val status = checkOriginalStatus(originalUri)
                 if (status == OriginalStatus.EXISTS) {
@@ -955,6 +973,40 @@ class MainViewModel(
         } catch (e: Exception) {
             e.printStackTrace()
         }
+    }
+
+    private suspend fun tryRepairLockboxFromStaging(expectedSha256: String): Boolean {
+        val originalUriStr = repository.getOriginalUri()
+            ?: repository.getRecoveryManifest()?.originalUri
+            ?: return false
+
+        val uri = Uri.parse(originalUriStr)
+
+        if (uri.scheme != "file") return false
+
+        val path = uri.path ?: return false
+        val file = java.io.File(path)
+
+        if (!file.exists()) return false
+        if (!file.absolutePath.contains("staging")) return false
+
+        val stagingValid = withContext(Dispatchers.IO) {
+            cryptoManager.verifySavedUriIntegrity(uri, expectedSha256)
+        }
+
+        if (!stagingValid) return false
+
+        val encryptedAgain = withContext(Dispatchers.IO) {
+            cryptoManager.encryptAndSave(uri, expectedSha256)
+        }
+
+        if (!encryptedAgain) return false
+
+        val repairedCheck = withContext(Dispatchers.IO) {
+            cryptoManager.getLockboxCheckResult(expectedSha256)
+        }
+
+        return repairedCheck is com.example.data.LockboxCheckResult.Ok
     }
 
     private fun formatCheckResultError(result: com.example.data.LockboxCheckResult): String {
