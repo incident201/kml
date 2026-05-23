@@ -78,6 +78,41 @@ class MainViewModel(
         return candidate.path.startsWith(stagingDir.path + java.io.File.separator)
     }
 
+    private fun syncParentDirectory(file: java.io.File) {
+        var fd: java.io.FileDescriptor? = null
+        try {
+            val parent = file.parentFile ?: return
+            fd = android.system.Os.open(parent.absolutePath, android.system.OsConstants.O_RDONLY, 0)
+            android.system.Os.fsync(fd)
+        } catch (e: Throwable) {
+            e.printStackTrace()
+        } finally {
+            if (fd != null) {
+                try {
+                    android.system.Os.close(fd)
+                } catch (ce: Throwable) {
+                    ce.printStackTrace()
+                }
+            }
+        }
+    }
+
+    fun discardCapturedStaging(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (uri.scheme != "file") return@launch
+            val path = uri.path ?: return@launch
+            val file = java.io.File(path)
+            if (isInStagingDir(file)) {
+                if (file.exists()) {
+                    val deleted = file.delete()
+                    if (deleted) {
+                        syncParentDirectory(file)
+                    }
+                }
+            }
+        }
+    }
+
     private suspend fun handleOriginalDeletedVerified(expectedSha256: String, plannedEnd: Long, durationMs: Long) {
         if (expectedSha256.isBlank() || plannedEnd <= 0L || durationMs <= 0L) {
             _lastErrorDetails.value =
@@ -159,7 +194,16 @@ class MainViewModel(
                 TransactionState.ENCRYPTING -> {
                     _isStatusUnknown.value = false
                     if (originalStatus == OriginalStatus.EXISTS) {
-                        performLockboxFailureCleanup()
+                        if (hasLockFile && originalSha256.isNotEmpty()) {
+                            _canCancelLock.value = true
+                            repository.setTransactionState(TransactionState.ENCRYPTED_VERIFIED)
+                            repository.setTransactionState(TransactionState.DELETE_ORIGINAL_PENDING)
+                            _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+                        } else {
+                            _lastErrorDetails.value = "Блокировка не завершена, оригинальный staging-файл сохранён."
+                            _canCancelLock.value = true
+                            _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+                        }
                     } else {
                         if (hasLockFile && originalSha256.isNotEmpty()) {
                             val plannedEnd = repository.getPlannedEndTimeUtc().let { if (it > 0L) it else (manifest?.endTimeUtc ?: 0L) }
@@ -268,7 +312,10 @@ class MainViewModel(
 
         return withContext(Dispatchers.IO) {
             try {
-                file.delete()
+                val deleted = file.delete()
+                if (deleted) {
+                    syncParentDirectory(file)
+                }
                 !file.exists()
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -305,8 +352,9 @@ class MainViewModel(
         // 1b. Get NTP time
         val currentNtpTime = SntpClient.getCurrentTimeUtc()
         if (currentNtpTime == null) {
-            _lastErrorDetails.value = "Не удалось проверить время по NTP до начала блокировки. Пожалуйста, проверьте подключение к сети и попробуйте сделать снимок ещё раз."
-            performLockboxFailureCleanup()
+            _lastErrorDetails.value = "Не удалось проверить время по NTP до начала блокировки. Пожалуйста, проверьте подключение к сети и попробуйте заблокировать ещё раз."
+            cleanupLockboxArtifactsOnly()
+            _uiState.value = LockScreenState.IDLE
             return
         }
         val durationMs = durationMinutes * 60 * 1000L
@@ -697,17 +745,31 @@ class MainViewModel(
         _unlockedBitmap.value = null
     }
 
+    private suspend fun cleanupLockboxArtifactsOnly(): Boolean {
+        return withContext(Dispatchers.IO) {
+            val encryptedDeleted = cryptoManager.deleteEncryptedFile()
+            val manifestDeleted = repository.deleteRecoveryManifest()
+            val prefsCleared = repository.clearLockSession()
+            _isStatusUnknown.value = false
+            encryptedDeleted && manifestDeleted && prefsCleared
+        }
+    }
+
     private suspend fun performLockboxFailureCleanup() {
         val fileDeleted = withContext(Dispatchers.IO) {
-            val encryptedDeleted = cryptoManager.deleteEncryptedFile()
+            val lockboxCleaned = cleanupLockboxArtifactsOnly()
             
             var stagingDeleted = true
             try {
                 val stagingDir = java.io.File(context.filesDir, "staging")
                 if (stagingDir.exists() && stagingDir.isDirectory) {
+                    var anyStagingDel = false
                     stagingDir.listFiles()?.forEach { file ->
                         val del = file.delete()
-                        if (!del) stagingDeleted = false
+                        if (!del) stagingDeleted = false else anyStagingDel = true
+                    }
+                    if (anyStagingDel) {
+                        syncParentDirectory(java.io.File(stagingDir, "dummy"))
                     }
                 }
             } catch (e: Exception) {
@@ -715,17 +777,9 @@ class MainViewModel(
                 stagingDeleted = false
             }
             
-            val manifestDeleted = repository.deleteRecoveryManifest()
-            
-            encryptedDeleted && stagingDeleted && manifestDeleted
+            lockboxCleaned && stagingDeleted
         }
         if (!fileDeleted) {
-            _cleanupFailed.value = true
-            _uiState.value = LockScreenState.IDLE
-            return
-        }
-        val prefsCleared = repository.clearLockSession()
-        if (!prefsCleared) {
             _cleanupFailed.value = true
             _uiState.value = LockScreenState.IDLE
             return

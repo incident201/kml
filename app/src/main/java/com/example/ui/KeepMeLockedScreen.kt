@@ -452,9 +452,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                 val currentUriStr = selectedUriStr
                                 selectedUriStr = null
                                 if (currentUriStr != null) {
-                                    coroutineScope.launch {
-                                        onDeleteOriginal(Uri.parse(currentUriStr))
-                                    }
+                                    viewModel.discardCapturedStaging(Uri.parse(currentUriStr))
                                 }
                             },
                             modifier = Modifier
@@ -747,7 +745,6 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                         OutlinedButton(
                             onClick = {
                                 viewModel.cancelPendingLock()
-                                selectedUriStr = null
                             },
                             modifier = Modifier.fillMaxWidth().height(56.dp)
                         ) {

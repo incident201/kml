@@ -122,13 +122,21 @@ class LockRepository(private val context: Context) {
     }
 
     private fun syncParentDirectory(file: java.io.File) {
+        var fd: java.io.FileDescriptor? = null
         try {
             val parent = file.parentFile ?: return
-            val fd = android.system.Os.open(parent.absolutePath, android.system.OsConstants.O_RDONLY, 0)
+            fd = android.system.Os.open(parent.absolutePath, android.system.OsConstants.O_RDONLY, 0)
             android.system.Os.fsync(fd)
-            android.system.Os.close(fd)
         } catch (e: Throwable) {
             e.printStackTrace()
+        } finally {
+            if (fd != null) {
+                try {
+                    android.system.Os.close(fd)
+                } catch (ce: Throwable) {
+                    ce.printStackTrace()
+                }
+            }
         }
     }
 
@@ -185,11 +193,20 @@ class LockRepository(private val context: Context) {
     fun deleteRecoveryManifest(): Boolean {
         return try {
             val file = java.io.File(context.filesDir, "recovery_manifest.txt")
+            val tmpFile = java.io.File(context.filesDir, "recovery_manifest.txt.tmp")
+            var anyDeleted = false
             if (file.exists()) {
                 file.delete()
-            } else {
-                true
+                anyDeleted = true
             }
+            if (tmpFile.exists()) {
+                tmpFile.delete()
+                anyDeleted = true
+            }
+            if (anyDeleted) {
+                syncParentDirectory(file)
+            }
+            true
         } catch (e: Exception) {
             e.printStackTrace()
             false

@@ -441,35 +441,47 @@ class CryptoManager(private val context: Context) {
 
     fun deleteEncryptedFile(): Boolean {
         var success = true
+        var anyDeleted = false
         if (lockFile.exists()) {
             val deleted = lockFile.delete()
-            if (!deleted || lockFile.exists()) success = false
+            if (!deleted || lockFile.exists()) success = false else anyDeleted = true
         }
         val lockFileTmp = File(context.filesDir, "locked_image.enc.tmp")
         if (lockFileTmp.exists()) {
             val deleted = lockFileTmp.delete()
-            if (!deleted || lockFileTmp.exists()) success = false
+            if (!deleted || lockFileTmp.exists()) success = false else anyDeleted = true
         }
         if (keyFile.exists()) {
             val deleted = keyFile.delete()
-            if (!deleted || keyFile.exists()) success = false
+            if (!deleted || keyFile.exists()) success = false else anyDeleted = true
         }
         val keyFileTmp = File(context.filesDir, "lockbox.key.tmp")
         if (keyFileTmp.exists()) {
             val deleted = keyFileTmp.delete()
-            if (!deleted || keyFileTmp.exists()) success = false
+            if (!deleted || keyFileTmp.exists()) success = false else anyDeleted = true
+        }
+        if (anyDeleted) {
+            syncParentDirectory(lockFile)
         }
         return success
     }
 
     private fun syncParentDirectory(file: File) {
+        var fd: java.io.FileDescriptor? = null
         try {
             val parent = file.parentFile ?: return
-            val fd = android.system.Os.open(parent.absolutePath, android.system.OsConstants.O_RDONLY, 0)
+            fd = android.system.Os.open(parent.absolutePath, android.system.OsConstants.O_RDONLY, 0)
             android.system.Os.fsync(fd)
-            android.system.Os.close(fd)
         } catch (e: Throwable) {
             e.printStackTrace()
+        } finally {
+            if (fd != null) {
+                try {
+                    android.system.Os.close(fd)
+                } catch (ce: Throwable) {
+                    ce.printStackTrace()
+                }
+            }
         }
     }
 
