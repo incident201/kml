@@ -94,7 +94,9 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                 if (path != null) {
                     val file = java.io.File(path)
                     if (file.exists() && file.absolutePath.contains("staging")) {
-                        file.delete() || !file.exists()
+                        // For camera staging files, we defer physical deletion until a successful cold-start verification.
+                        // So we return true here but do not actually delete yet.
+                        true
                     } else {
                         true
                     }

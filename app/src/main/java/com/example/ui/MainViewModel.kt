@@ -187,9 +187,10 @@ class MainViewModel(
                 }
                 TransactionState.DELETE_ORIGINAL_PENDING -> {
                     val originalSha256 = repository.getOriginalSha256() ?: ""
-                    val hasRecoverable = withContext(Dispatchers.IO) {
-                        cryptoManager.recoverableEncryptedFileIsValid(originalSha256)
+                    val checkResult = withContext(Dispatchers.IO) {
+                        cryptoManager.getLockboxCheckResult(originalSha256)
                     }
+                    val hasRecoverable = checkResult is com.example.data.LockboxCheckResult.Ok
                     if (!hasRecoverable) {
                         val originalUriStr = repository.getOriginalUri()
                         val originalStatus = originalUriStr?.let { checkOriginalStatus(Uri.parse(it)) }
@@ -199,12 +200,14 @@ class MainViewModel(
                             performLockboxFailureCleanup()
                         } else {
                             // Original not confirmed exists, but encrypted copy is gone or invalid. Critical loss/missing error.
-                            _lastErrorDetails.value = CryptoManager.lastVerifyException?.let {
-                                it.toString() + "\n" + it.stackTrace?.joinToString("\n") { ste -> "\tat " + ste.toString() }
-                            } ?: "No verify exception recorded"
+                            _lastErrorDetails.value = formatCheckResultError(checkResult)
                             _uiState.value = LockScreenState.MISSING_FILE
                         }
                     } else {
+                        // Cold start survived, successfully read. Clean up original staging if any.
+                        withContext(Dispatchers.IO) {
+                            clearStagingDir()
+                        }
                         val originalUriStr = repository.getOriginalUri()
                         if (originalUriStr != null) {
                             val originalUri = Uri.parse(originalUriStr)
@@ -234,15 +237,18 @@ class MainViewModel(
                 }
                 TransactionState.LOCKED -> {
                     val originalSha256 = repository.getOriginalSha256() ?: ""
-                    val hasRecoverable = withContext(Dispatchers.IO) {
-                        cryptoManager.recoverableEncryptedFileIsValid(originalSha256)
+                    val checkResult = withContext(Dispatchers.IO) {
+                        cryptoManager.getLockboxCheckResult(originalSha256)
                     }
+                    val hasRecoverable = checkResult is com.example.data.LockboxCheckResult.Ok
                     if (!hasRecoverable) {
-                        _lastErrorDetails.value = CryptoManager.lastVerifyException?.let {
-                            it.toString() + "\n" + it.stackTrace?.joinToString("\n") { ste -> "\tat " + ste.toString() }
-                        } ?: "No verify exception recorded"
+                        _lastErrorDetails.value = formatCheckResultError(checkResult)
                         _uiState.value = LockScreenState.MISSING_FILE
                     } else {
+                        // Cold start survived, successfully read. Clean up original staging if any.
+                        withContext(Dispatchers.IO) {
+                            clearStagingDir()
+                        }
                         val currentBootTime = SystemClock.elapsedRealtime()
                         val bootTimeAtLock = repository.getBootTimeAtLock()
                         if (currentBootTime < bootTimeAtLock) {
@@ -255,15 +261,18 @@ class MainViewModel(
                 }
                 TransactionState.UNLOCKED_PENDING_EXPORT -> {
                     val originalSha256 = repository.getOriginalSha256() ?: ""
-                    val hasRecoverable = withContext(Dispatchers.IO) {
-                        cryptoManager.recoverableEncryptedFileIsValid(originalSha256)
+                    val checkResult = withContext(Dispatchers.IO) {
+                        cryptoManager.getLockboxCheckResult(originalSha256)
                     }
+                    val hasRecoverable = checkResult is com.example.data.LockboxCheckResult.Ok
                     if (!hasRecoverable) {
-                        _lastErrorDetails.value = CryptoManager.lastVerifyException?.let {
-                            it.toString() + "\n" + it.stackTrace?.joinToString("\n") { ste -> "\tat " + ste.toString() }
-                        } ?: "No verify exception recorded"
+                        _lastErrorDetails.value = formatCheckResultError(checkResult)
                         _uiState.value = LockScreenState.MISSING_FILE
                     } else {
+                        // Cold start survived, successfully read. Clean up original staging if any.
+                        withContext(Dispatchers.IO) {
+                            clearStagingDir()
+                        }
                         _isStatusUnknown.value = false
                         _uiState.value = LockScreenState.UNLOCKED_PENDING_EXPORT
                         loadDecryptedBitmap()
@@ -308,118 +317,116 @@ class MainViewModel(
         }
     }
 
-    fun lockImage(uri: Uri, durationMinutes: Int, onDeleteOriginal: suspend (Uri) -> Boolean) {
-        viewModelScope.launch {
-            _uiState.value = LockScreenState.LOCKING
-            
-            // 1. Extract metadata
-            val originalMeta = withContext(Dispatchers.IO) {
-                cryptoManager.queryOriginalFileMeta(uri)
-            }
-            if (originalMeta == null) {
-                performLockboxFailureCleanup()
-                return@launch
-            }
-            
-            // 1b. Get NTP time
-            val currentNtpTime = SntpClient.getCurrentTimeUtc()
-            if (currentNtpTime == null) {
-                performLockboxFailureCleanup()
-                return@launch
-            }
-            val startBootTime = SystemClock.elapsedRealtime()
-            val durationMs = durationMinutes * 60 * 1000L
-            val plannedEndTimeUtc = currentNtpTime + durationMs
+    suspend fun lockImage(uri: Uri, durationMinutes: Int, onDeleteOriginal: suspend (Uri) -> Boolean) {
+        _uiState.value = LockScreenState.LOCKING
+        
+        // 1. Extract metadata
+        val originalMeta = withContext(Dispatchers.IO) {
+            cryptoManager.queryOriginalFileMeta(uri)
+        }
+        if (originalMeta == null) {
+            performLockboxFailureCleanup()
+            return
+        }
+        
+        // 1b. Get NTP time
+        val currentNtpTime = SntpClient.getCurrentTimeUtc()
+        if (currentNtpTime == null) {
+            performLockboxFailureCleanup()
+            return
+        }
+        val startBootTime = SystemClock.elapsedRealtime()
+        val durationMs = durationMinutes * 60 * 1000L
+        val plannedEndTimeUtc = currentNtpTime + durationMs
 
-            // Write state, metadata & duration safely
-            var writeSuccess = repository.setTransactionState(TransactionState.ENCRYPTING)
-            writeSuccess = writeSuccess && repository.saveOriginalMetadata(
-                originalUri = uri.toString(),
-                displayName = originalMeta.displayName,
-                mimeType = originalMeta.mimeType,
-                originalSize = originalMeta.size
-            )
-            writeSuccess = writeSuccess && repository.saveOriginalSha256(originalMeta.sha256)
-            writeSuccess = writeSuccess && repository.saveLockDuration(durationMinutes)
-            writeSuccess = writeSuccess && repository.savePlannedEndTimeUtc(plannedEndTimeUtc)
-            writeSuccess = writeSuccess && repository.saveRecoveryManifest(
-                originalUri = uri.toString(),
-                displayName = originalMeta.displayName ?: "",
-                mimeType = originalMeta.mimeType ?: "image/jpeg",
-                originalSize = originalMeta.size,
-                sha256 = originalMeta.sha256,
-                endTimeUtc = plannedEndTimeUtc,
-                durationMs = durationMs
-            )
-            
-            if (!writeSuccess) {
-                performLockboxFailureCleanup()
-                return@launch
-            }
+        // Write state, metadata & duration safely
+        var writeSuccess = repository.setTransactionState(TransactionState.ENCRYPTING)
+        writeSuccess = writeSuccess && repository.saveOriginalMetadata(
+            originalUri = uri.toString(),
+            displayName = originalMeta.displayName,
+            mimeType = originalMeta.mimeType,
+            originalSize = originalMeta.size
+        )
+        writeSuccess = writeSuccess && repository.saveOriginalSha256(originalMeta.sha256)
+        writeSuccess = writeSuccess && repository.saveLockDuration(durationMinutes)
+        writeSuccess = writeSuccess && repository.savePlannedEndTimeUtc(plannedEndTimeUtc)
+        writeSuccess = writeSuccess && repository.saveRecoveryManifest(
+            originalUri = uri.toString(),
+            displayName = originalMeta.displayName ?: "",
+            mimeType = originalMeta.mimeType ?: "image/jpeg",
+            originalSize = originalMeta.size,
+            sha256 = originalMeta.sha256,
+            endTimeUtc = plannedEndTimeUtc,
+            durationMs = durationMs
+        )
+        
+        if (!writeSuccess) {
+            performLockboxFailureCleanup()
+            return
+        }
 
-            // 2. Encrypt & Save using SHA-256 integrity
-            val encryptSuccess = withContext(Dispatchers.IO) { 
-                cryptoManager.encryptAndSave(uri, originalMeta.sha256) 
-            }
-            if (!encryptSuccess) {
-                performLockboxFailureCleanup()
-                return@launch
-            }
+        // 2. Encrypt & Save using SHA-256 integrity
+        val encryptSuccess = withContext(Dispatchers.IO) { 
+            cryptoManager.encryptAndSave(uri, originalMeta.sha256) 
+        }
+        if (!encryptSuccess) {
+            performLockboxFailureCleanup()
+            return
+        }
 
-            // 3. Document verified encrypted state
-            if (!repository.setTransactionState(TransactionState.ENCRYPTED_VERIFIED)) {
-                performLockboxFailureCleanup()
-                return@launch
-            }
+        // 3. Document verified encrypted state
+        if (!repository.setTransactionState(TransactionState.ENCRYPTED_VERIFIED)) {
+            performLockboxFailureCleanup()
+            return
+        }
 
-            // 4. Deletion flow transition
-            if (!repository.setTransactionState(TransactionState.DELETE_ORIGINAL_PENDING)) {
-                performLockboxFailureCleanup()
-                return@launch
-            }
-            
-            val deleted = onDeleteOriginal(uri)
-            if (!deleted) {
-                // Deletion dialog rejected or failed
-                performLockboxFailureCleanup()
-                return@launch
-            }
+        // 4. Deletion flow transition
+        if (!repository.setTransactionState(TransactionState.DELETE_ORIGINAL_PENDING)) {
+            performLockboxFailureCleanup()
+            return
+        }
+        
+        val deleted = onDeleteOriginal(uri)
+        if (!deleted) {
+            // Deletion dialog rejected or failed
+            performLockboxFailureCleanup()
+            return
+        }
 
-            // 5. Post-deletion hard verification!
-            val status = checkOriginalStatus(uri)
-            when (status) {
-                OriginalStatus.DELETED -> {
-                    _canCancelLock.value = false
-                    _isStatusUnknown.value = false
-                    // 6. Success locking state setup
-                    var endTimeUtc = repository.getPlannedEndTimeUtc()
-                    if (endTimeUtc == 0L) {
-                        endTimeUtc = currentNtpTime + durationMs
-                    }
-                    val bootTime = startBootTime
-                    
-                    val saveSuccess = repository.saveLockSession(endTimeUtc, bootTime, durationMs) &&
-                                      repository.setTransactionState(TransactionState.LOCKED)
-                    
-                    if (saveSuccess) {
-                        // Schedule Alarm
-                        scheduleAlarm(endTimeUtc, currentNtpTime)
-                        _uiState.value = LockScreenState.LOCKED
-                        startTimer()
-                    } else {
-                        _uiState.value = LockScreenState.PERSISTENCE_ERROR
-                    }
+        // 5. Post-deletion hard verification!
+        val status = checkOriginalStatus(uri)
+        when (status) {
+            OriginalStatus.DELETED -> {
+                _canCancelLock.value = false
+                _isStatusUnknown.value = false
+                // 6. Success locking state setup
+                var endTimeUtc = repository.getPlannedEndTimeUtc()
+                if (endTimeUtc == 0L) {
+                    endTimeUtc = currentNtpTime + durationMs
                 }
-                OriginalStatus.EXISTS -> {
-                    _canCancelLock.value = true
-                    _isStatusUnknown.value = false
-                    _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+                val bootTime = startBootTime
+                
+                val saveSuccess = repository.saveLockSession(endTimeUtc, bootTime, durationMs) &&
+                                  repository.setTransactionState(TransactionState.LOCKED)
+                
+                if (saveSuccess) {
+                    // Schedule Alarm
+                    scheduleAlarm(endTimeUtc, currentNtpTime)
+                    _uiState.value = LockScreenState.LOCKED
+                    startTimer()
+                } else {
+                    _uiState.value = LockScreenState.PERSISTENCE_ERROR
                 }
-                OriginalStatus.UNKNOWN -> {
-                    _canCancelLock.value = false
-                    _isStatusUnknown.value = true
-                    _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
-                }
+            }
+            OriginalStatus.EXISTS -> {
+                _canCancelLock.value = true
+                _isStatusUnknown.value = false
+                _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+            }
+            OriginalStatus.UNKNOWN -> {
+                _canCancelLock.value = false
+                _isStatusUnknown.value = true
+                _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
             }
         }
     }
@@ -430,14 +437,16 @@ class MainViewModel(
             val originalUri = Uri.parse(originalUriStr)
             
             val originalSha256 = repository.getOriginalSha256() ?: ""
-            val hasRecoverable = withContext(Dispatchers.IO) {
-                cryptoManager.recoverableEncryptedFileIsValid(originalSha256)
+            val checkResult = withContext(Dispatchers.IO) {
+                cryptoManager.getLockboxCheckResult(originalSha256)
             }
+            val hasRecoverable = checkResult is com.example.data.LockboxCheckResult.Ok
             if (!hasRecoverable) {
                 val status = checkOriginalStatus(originalUri)
                 if (status == OriginalStatus.EXISTS) {
                     performLockboxFailureCleanup()
                 } else {
+                    _lastErrorDetails.value = formatCheckResultError(checkResult)
                     _uiState.value = LockScreenState.MISSING_FILE
                 }
                 return@launch
@@ -900,7 +909,11 @@ class MainViewModel(
                 val filePath = uri.path
                 if (filePath != null) {
                     val file = java.io.File(filePath)
-                    if (file.exists()) {
+                    if (file.absolutePath.contains("staging")) {
+                        // For camera staging files, we treat them as "deleted" to transition straight to locking,
+                        // keeping the raw file as a secure back-up until cold start is fully verified.
+                        OriginalStatus.DELETED
+                    } else if (file.exists()) {
                         OriginalStatus.EXISTS
                     } else {
                         OriginalStatus.DELETED
@@ -928,6 +941,35 @@ class MainViewModel(
                     OriginalStatus.UNKNOWN
                 }
             }
+        }
+    }
+
+    private fun clearStagingDir() {
+        try {
+            val stagingDir = java.io.File(context.filesDir, "staging")
+            if (stagingDir.exists() && stagingDir.isDirectory) {
+                stagingDir.listFiles()?.forEach { file ->
+                    file.delete()
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun formatCheckResultError(result: com.example.data.LockboxCheckResult): String {
+        return when (result) {
+            is com.example.data.LockboxCheckResult.FileMissing -> "Критическая ошибка: Файл локбокса (.enc) полностью отсутствует на диске."
+            is com.example.data.LockboxCheckResult.ShaMissing -> "Системная ошибка: SHA-256 ожидаемого оригинала отсутствует в реестре."
+            is com.example.data.LockboxCheckResult.DecryptFailed -> {
+                val err = result.error
+                "Сбой дешифрования Keystore/AES-GCM:\n${err.javaClass.simpleName}: ${err.message}\n" +
+                        err.stackTrace?.joinToString("\n") { ste -> "\tat $ste" }
+            }
+            is com.example.data.LockboxCheckResult.HashMismatch -> {
+                "Ошибка целостности данных (Контрольная сумма не совпадает):\nОжидалось: ${result.expected}\nФактически: ${result.actual}"
+            }
+            else -> "Неизвестный статус целостности"
         }
     }
 
