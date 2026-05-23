@@ -118,29 +118,6 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
     val coroutineScope = rememberCoroutineScope()
 
     var isDeleteInProgress by remember { mutableStateOf(false) }
-    val onDeleteOriginal: suspend (Uri) -> Boolean = { uriToDelete ->
-        withContext(Dispatchers.IO) {
-            val scheme = uriToDelete.scheme
-            if (scheme == "file") {
-                val path = uriToDelete.path
-                if (path != null) {
-                    val file = java.io.File(path)
-                    if (file.exists() && file.absolutePath.contains("staging")) {
-                        // For camera staging files, we defer physical deletion until a successful cold-start verification.
-                        // So we return true here but do not actually delete yet.
-                        true
-                    } else {
-                        true
-                    }
-                } else {
-                    true
-                }
-            } else {
-                true
-            }
-        }
-    }
-
     val activity = context as? Activity
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -426,11 +403,9 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                                 coroutineScope.launch {
                                     val uriToLock = selectedUri!!
                                     try {
-                                        viewModel.lockImage(uriToLock, durationMinutes, onDeleteOriginal)
+                                        viewModel.lockImage(uriToLock, durationMinutes)
                                     } catch (t: Throwable) {
-                                        android.widget.Toast.makeText(context, "Ошибка при подготовке блокировки", android.widget.Toast.LENGTH_LONG).show()
-                                        onDeleteOriginal(uriToLock)
-                                        viewModel.completeAndClean()
+                                        android.widget.Toast.makeText(context, "Ошибка при подготовке блокировки: ${t.localizedMessage}", android.widget.Toast.LENGTH_LONG).show()
                                     } finally {
                                         isDeleteInProgress = false
                                     }
@@ -700,7 +675,7 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
 
                     Button(
                         onClick = {
-                            viewModel.retryDeleteAndLock(onDeleteOriginal)
+                            viewModel.retryDeleteAndLock()
                         },
                         modifier = Modifier.fillMaxWidth().height(56.dp)
                     ) {
@@ -915,6 +890,95 @@ fun KeepMeLockedScreen(viewModel: MainViewModel) {
                             ) {
                                 Text("Проверить время")
                             }
+                        }
+                    }
+                }
+                LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE -> {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        modifier = Modifier.size(72.dp),
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Text(
+                        text = "Блокировка не завершена",
+                        style = MaterialTheme.typography.headlineSmall,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Защищённая копия отсутствует или повреждена, но оригинальный staging-файл сохранён в безопасности.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+                    lastErrorDetails?.let { details ->
+                        Spacer(Modifier.height(16.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 160.dp)
+                                .background(MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium)
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                text = details,
+                                style = androidx.compose.ui.text.TextStyle(
+                                    fontSize = androidx.compose.ui.unit.TextUnit.Unspecified,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                ),
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.verticalScroll(rememberScrollState())
+                             )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(32.dp))
+
+                    Button(
+                        onClick = {
+                            selectedUri?.let { uriToLock ->
+                                isDeleteInProgress = true
+                                coroutineScope.launch {
+                                    try {
+                                        viewModel.lockImage(uriToLock, durationMinutes)
+                                    } catch (t: Throwable) {
+                                        android.widget.Toast.makeText(context, "Ошибка при подготовке блокировки: ${t.localizedMessage}", android.widget.Toast.LENGTH_LONG).show()
+                                    } finally {
+                                        isDeleteInProgress = false
+                                    }
+                                }
+                            }
+                        },
+                        enabled = !isDeleteInProgress && selectedUri != null,
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                    ) {
+                        Text("Повторить блокировку")
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.completeAndClean()
+                            selectedUriStr = null
+                        },
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                    ) {
+                        Text("Удалить снимок и сбросить")
+                    }
+                     
+                    if (canCancelLock) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.cancelPendingLock()
+                            },
+                            modifier = Modifier.fillMaxWidth().height(56.dp)
+                        ) {
+                            Text("Отмена (файл цел)")
                         }
                     }
                 }

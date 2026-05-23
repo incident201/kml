@@ -194,19 +194,20 @@ class LockRepository(private val context: Context) {
         return try {
             val file = java.io.File(context.filesDir, "recovery_manifest.txt")
             val tmpFile = java.io.File(context.filesDir, "recovery_manifest.txt.tmp")
+            var success = true
             var anyDeleted = false
             if (file.exists()) {
-                file.delete()
-                anyDeleted = true
+                val deleted = file.delete()
+                if (!deleted || file.exists()) success = false else anyDeleted = true
             }
             if (tmpFile.exists()) {
-                tmpFile.delete()
-                anyDeleted = true
+                val deleted = tmpFile.delete()
+                if (!deleted || tmpFile.exists()) success = false else anyDeleted = true
             }
             if (anyDeleted) {
                 syncParentDirectory(file)
             }
-            true
+            success
         } catch (e: Exception) {
             e.printStackTrace()
             false
