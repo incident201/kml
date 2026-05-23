@@ -101,19 +101,37 @@ class MainViewModel(
     }
 
     fun discardCapturedStaging(uri: Uri) {
-        viewModelScope.launch(Dispatchers.IO) {
-            if (uri.scheme != "file") return@launch
-            val path = uri.path ?: return@launch
-            val file = java.io.File(path)
-            if (isInStagingDir(file)) {
-                if (file.exists()) {
-                    val deleted = file.delete()
-                    if (deleted) {
-                        syncParentDirectory(file)
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                if (uri.scheme == "file") {
+                    val path = uri.path
+                    if (path != null) {
+                        val file = java.io.File(path)
+                        if (isInStagingDir(file)) {
+                            if (file.exists()) {
+                                val deleted = file.delete()
+                                if (deleted) {
+                                    syncParentDirectory(file)
+                                }
+                            }
+                        }
                     }
                 }
             }
+            val pending = _pendingOriginalUri.value
+            if (pending != null && Uri.parse(pending) == uri) {
+                performLockboxFailureCleanup()
+            } else {
+                val repoUriStr = repository.getOriginalUri()
+                if (repoUriStr != null && Uri.parse(repoUriStr) == uri) {
+                    performLockboxFailureCleanup()
+                }
+            }
         }
+    }
+
+    fun discardPendingOriginalAndReset(uri: Uri) {
+        discardCapturedStaging(uri)
     }
 
     private suspend fun handleOriginalDeletedVerified(expectedSha256: String, plannedEnd: Long, durationMs: Long) {
@@ -388,31 +406,54 @@ class MainViewModel(
             _uiState.value = LockScreenState.IDLE
             return
         }
+
+        // 1a. Early persistent registration to prevent staging file from becoming an orphan if VM/process dies or NTP fails
+        _pendingOriginalUri.value = uri.toString()
+        _canCancelLock.value = true
+
+        val earlySaveSuccess = withContext(Dispatchers.IO) {
+            var s = repository.setTransactionState(TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE)
+            s = s && repository.saveOriginalMetadata(
+                originalUri = uri.toString(),
+                displayName = originalMeta.displayName,
+                mimeType = originalMeta.mimeType,
+                originalSize = originalMeta.size
+            )
+            s = s && repository.saveOriginalSha256(originalMeta.sha256)
+            s = s && repository.saveLockDuration(durationMinutes)
+            // Immediately store backup recovery manifest
+            s = s && repository.saveRecoveryManifest(
+                originalUri = uri.toString(),
+                displayName = originalMeta.displayName ?: "",
+                mimeType = originalMeta.mimeType ?: "image/jpeg",
+                originalSize = originalMeta.size,
+                sha256 = originalMeta.sha256,
+                endTimeUtc = 0L,
+                durationMs = durationMinutes * 60 * 1000L
+            )
+            s
+        }
+
+        if (!earlySaveSuccess) {
+            _lastErrorDetails.value = "Ошибка сохранения сессии при начальной регистрации файла"
+            cleanupCryptoPayloadOnly()
+            _uiState.value = LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE
+            return
+        }
         
         // 1b. Get NTP time
         val currentNtpTime = SntpClient.getCurrentTimeUtc()
         if (currentNtpTime == null) {
             _lastErrorDetails.value = "Не удалось проверить время по NTP до начала блокировки. Пожалуйста, проверьте подключение к сети и попробуйте заблокировать ещё раз."
             cleanupCryptoPayloadOnly()
-            _uiState.value = LockScreenState.IDLE
+            _uiState.value = LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE
             return
         }
         val durationMs = durationMinutes * 60 * 1000L
         val plannedEndTimeUtc = currentNtpTime + durationMs
 
-        // Expose pending original URI for UI
-        _pendingOriginalUri.value = uri.toString()
-
-        // Write state, metadata & duration safely
+        // Update state to ENCRYPTING and write planned duration/endtime securely
         var writeSuccess = repository.setTransactionState(TransactionState.ENCRYPTING)
-        writeSuccess = writeSuccess && repository.saveOriginalMetadata(
-            originalUri = uri.toString(),
-            displayName = originalMeta.displayName,
-            mimeType = originalMeta.mimeType,
-            originalSize = originalMeta.size
-        )
-        writeSuccess = writeSuccess && repository.saveOriginalSha256(originalMeta.sha256)
-        writeSuccess = writeSuccess && repository.saveLockDuration(durationMinutes)
         writeSuccess = writeSuccess && repository.savePlannedEndTimeUtc(plannedEndTimeUtc)
         writeSuccess = writeSuccess && repository.saveRecoveryManifest(
             originalUri = uri.toString(),
@@ -428,7 +469,6 @@ class MainViewModel(
             _lastErrorDetails.value = "Ошибка сохранения сессии при подготовке ENCRYPTING"
             cleanupCryptoPayloadOnly()
             repository.setTransactionState(TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE)
-            _canCancelLock.value = true
             _uiState.value = LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE
             return
         }
@@ -1064,13 +1104,7 @@ class MainViewModel(
     }
 
     fun cancelPendingLock() {
-        viewModelScope.launch {
-            if ((_uiState.value == LockScreenState.DELETE_ORIGINAL_PENDING || _uiState.value == LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE) && _canCancelLock.value) {
-                cleanupLockboxArtifactsOnly()
-                _pendingOriginalUri.value = null
-                _uiState.value = LockScreenState.IDLE
-            }
-        }
+        returnToPendingOriginal()
     }
 
     fun returnToPendingOriginal() {
