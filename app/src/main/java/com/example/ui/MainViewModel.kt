@@ -298,6 +298,20 @@ class MainViewModel(
         }
     }
 
+    private suspend fun deleteStagingOriginal(uri: Uri): Boolean {
+        if (uri.scheme != "file") return true
+
+        val path = uri.path ?: return true
+        val file = java.io.File(path)
+
+        if (!file.absolutePath.contains("staging")) return true
+        if (!file.exists()) return true
+
+        return withContext(Dispatchers.IO) {
+            file.delete() && !file.exists()
+        }
+    }
+
     private fun transitionToLockedState() {
         val durationMinutes = repository.getDurationMinutes()
         val durationMs = durationMinutes * 60 * 1000L
@@ -320,6 +334,13 @@ class MainViewModel(
                                repository.setTransactionState(TransactionState.LOCKED)
             
             if (saveSuccess) {
+                val originalUriStr = repository.getOriginalUri()
+                if (originalUriStr != null) {
+                    val stagingDeleted = deleteStagingOriginal(Uri.parse(originalUriStr))
+                    if (!stagingDeleted) {
+                        _cleanupFailed.value = true
+                    }
+                }
                 scheduleAlarm(calculatedEndTime, currentNtpTime)
                 _uiState.value = LockScreenState.LOCKED
                 startTimer()
@@ -422,6 +443,10 @@ class MainViewModel(
                                   repository.setTransactionState(TransactionState.LOCKED)
                 
                 if (saveSuccess) {
+                    val stagingDeleted = deleteStagingOriginal(uri)
+                    if (!stagingDeleted) {
+                        _cleanupFailed.value = true
+                    }
                     // Schedule Alarm
                     scheduleAlarm(endTimeUtc, currentNtpTime)
                     _uiState.value = LockScreenState.LOCKED
@@ -500,6 +525,10 @@ class MainViewModel(
                                       repository.setTransactionState(TransactionState.LOCKED)
                     
                     if (saveSuccess) {
+                        val stagingDeleted = deleteStagingOriginal(originalUri)
+                        if (!stagingDeleted) {
+                            _cleanupFailed.value = true
+                        }
                         scheduleAlarm(calculatedEndTime, currentNtpTime)
                         _uiState.value = LockScreenState.LOCKED
                         startTimer()

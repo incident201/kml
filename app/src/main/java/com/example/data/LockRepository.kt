@@ -202,20 +202,15 @@ class LockRepository(private val context: Context) {
     }
 
     fun clearLockSession(): Boolean {
-        return sharedPreferences.edit()
-            .remove("is_locked")
-            .remove("end_time_utc")
-            .remove("boot_time_at_lock")
-            .remove("duration_ms")
-            .remove("had_reboot")
-            .remove("transaction_state")
-            .remove("original_uri")
-            .remove("original_display_name")
-            .remove("original_mime_type")
-            .remove("original_size")
-            .remove("original_sha256")
-            .remove("duration_minutes")
-            .remove("planned_end_time_utc")
-            .commit()
+        val clearPrefs = sharedPreferences.edit().clear().commit()
+        try {
+            val prefsFile = java.io.File(context.filesDir.parentFile, "shared_prefs/lock_prefs.xml")
+            if (prefsFile.exists()) {
+                prefsFile.delete()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return clearPrefs
     }
 }

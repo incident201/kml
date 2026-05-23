@@ -53,14 +53,16 @@ class CryptoManager(private val context: Context) {
                 out.flush()
                 out.fd.sync()
             }
-            if (keyFile.exists()) keyFile.delete()
+            if (keyFile.exists() && !keyFile.delete()) {
+                throw IllegalStateException("Failed to delete existing lockbox key file")
+            }
             if (!tmp.renameTo(keyFile)) {
                 tmp.delete()
                 throw IllegalStateException("Failed to commit lockbox key file")
             }
         } catch (e: Exception) {
-            e.printStackTrace()
             if (tmp.exists()) tmp.delete()
+            throw e
         }
 
         return javax.crypto.spec.SecretKeySpec(bytes, "AES")
@@ -162,23 +164,20 @@ class CryptoManager(private val context: Context) {
                 fos.channel.force(true)
             }
 
-            // Verify integrity of the temporary file immediately
-            val verified = verifyFileIntegrity(lockFileTmp, expectedSha256)
-            if (verified) {
-                if (lockFile.exists() && !lockFile.delete()) {
-                    lockFileTmp.delete()
-                    return false
-                }
-                if (lockFileTmp.renameTo(lockFile)) {
+            if (lockFile.exists() && !lockFile.delete()) {
+                lockFileTmp.delete()
+                return false
+            }
+            if (lockFileTmp.renameTo(lockFile)) {
+                val verified = verifyFileIntegrity(lockFile, expectedSha256)
+                if (verified) {
                     true
                 } else {
-                    lockFileTmp.delete()
+                    lockFile.delete()
                     false
                 }
             } else {
-                if (lockFileTmp.exists()) {
-                    lockFileTmp.delete()
-                }
+                lockFileTmp.delete()
                 false
             }
         } catch (e: Exception) {
@@ -346,6 +345,13 @@ class CryptoManager(private val context: Context) {
         val lockFileTmp = File(context.filesDir, "locked_image.enc.tmp")
         if (lockFileTmp.exists()) {
             success = lockFileTmp.delete() && !lockFileTmp.exists() && success
+        }
+        if (keyFile.exists()) {
+            success = keyFile.delete() && !keyFile.exists() && success
+        }
+        val keyFileTmp = File(context.filesDir, "lockbox.key.tmp")
+        if (keyFileTmp.exists()) {
+            success = keyFileTmp.delete() && !keyFileTmp.exists() && success
         }
         return success
     }
