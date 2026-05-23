@@ -72,6 +72,32 @@ class MainViewModel(
     private var timerJob: kotlinx.coroutines.Job? = null
 
     init {
+        val preState = try { repository.getTransactionState() } catch (e: Exception) { TransactionState.IDLE }
+        when (preState) {
+            TransactionState.LOCKED -> {
+                _uiState.value = LockScreenState.LOCKED
+                val endNtpUtx = repository.getEndTimeUtc()
+                val bootAtLock = repository.getBootTimeAtLock()
+                val currentBootTime = SystemClock.elapsedRealtime()
+                val passed = currentBootTime - bootAtLock
+                val startNtp = endNtpUtx - repository.getDurationMs()
+                val currentEstimateUtc = startNtp + passed
+                val remaining = endNtpUtx - currentEstimateUtc
+                _timeLeftMs.value = remaining.coerceAtLeast(0L)
+            }
+            TransactionState.UNLOCKED_PENDING_EXPORT -> {
+                _uiState.value = LockScreenState.UNLOCKED_PENDING_EXPORT
+            }
+            TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE -> {
+                _uiState.value = LockScreenState.LOCK_FAILED_ORIGINAL_AVAILABLE
+            }
+            TransactionState.DELETE_ORIGINAL_PENDING -> {
+                _uiState.value = LockScreenState.DELETE_ORIGINAL_PENDING
+            }
+            else -> {
+                _uiState.value = LockScreenState.IDLE
+            }
+        }
         checkCurrentState()
     }
 
@@ -199,8 +225,7 @@ class MainViewModel(
 
             val originalSha256 = repository.getOriginalSha256() ?: manifest?.sha256 ?: ""
             var hasLockFile = withContext(Dispatchers.IO) {
-                cryptoManager.recoverableEncryptedFileExists() &&
-                cryptoManager.getLockboxCheckResult(originalSha256) is com.example.data.LockboxCheckResult.Ok
+                cryptoManager.recoverableEncryptedFileExists()
             }
             if (!hasLockFile && originalSha256.isNotEmpty()) {
                 val repaired = tryRepairLockboxFromStaging(originalSha256)
