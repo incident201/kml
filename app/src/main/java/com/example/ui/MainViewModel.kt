@@ -962,19 +962,6 @@ class MainViewModel(
         }
     }
 
-    private fun clearStagingDir() {
-        try {
-            val stagingDir = java.io.File(context.filesDir, "staging")
-            if (stagingDir.exists() && stagingDir.isDirectory) {
-                stagingDir.listFiles()?.forEach { file ->
-                    file.delete()
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
     private suspend fun tryRepairLockboxFromStaging(expectedSha256: String): Boolean {
         val originalUriStr = repository.getOriginalUri()
             ?: repository.getRecoveryManifest()?.originalUri
