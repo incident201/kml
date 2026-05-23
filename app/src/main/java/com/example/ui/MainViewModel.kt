@@ -102,7 +102,7 @@ class MainViewModel(
 
     fun discardCapturedStaging(uri: Uri) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
+            val deleteSuccessful = withContext(Dispatchers.IO) {
                 if (uri.scheme == "file") {
                     val path = uri.path
                     if (path != null) {
@@ -112,20 +112,38 @@ class MainViewModel(
                                 val deleted = file.delete()
                                 if (deleted) {
                                     syncParentDirectory(file)
+                                    true
+                                } else {
+                                    false
                                 }
+                            } else {
+                                true
                             }
+                        } else {
+                            true
                         }
+                    } else {
+                        true
                     }
+                } else {
+                    true
                 }
             }
-            val pending = _pendingOriginalUri.value
-            if (pending != null && Uri.parse(pending) == uri) {
-                performLockboxFailureCleanup()
-            } else {
-                val repoUriStr = repository.getOriginalUri()
-                if (repoUriStr != null && Uri.parse(repoUriStr) == uri) {
+
+            if (deleteSuccessful) {
+                val pending = _pendingOriginalUri.value
+                if (pending != null && Uri.parse(pending) == uri) {
                     performLockboxFailureCleanup()
+                } else {
+                    val repoUriStr = repository.getOriginalUri()
+                    if (repoUriStr != null && Uri.parse(repoUriStr) == uri) {
+                        performLockboxFailureCleanup()
+                    }
                 }
+                _cleanupFailed.value = false
+            } else {
+                _cleanupFailed.value = true
+                _lastErrorDetails.value = "Не удалось удалить файл из staging. Пожалуйста, попробуйте сбросить ещё раз."
             }
         }
     }
@@ -412,17 +430,16 @@ class MainViewModel(
         _canCancelLock.value = true
 
         val earlySaveSuccess = withContext(Dispatchers.IO) {
-            var s = repository.setTransactionState(TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE)
-            s = s && repository.saveOriginalMetadata(
+            val txSaved = repository.setTransactionState(TransactionState.LOCK_FAILED_ORIGINAL_AVAILABLE)
+            val metaSaved = repository.saveOriginalMetadata(
                 originalUri = uri.toString(),
                 displayName = originalMeta.displayName,
                 mimeType = originalMeta.mimeType,
                 originalSize = originalMeta.size
             )
-            s = s && repository.saveOriginalSha256(originalMeta.sha256)
-            s = s && repository.saveLockDuration(durationMinutes)
-            // Immediately store backup recovery manifest
-            s = s && repository.saveRecoveryManifest(
+            val shaSaved = repository.saveOriginalSha256(originalMeta.sha256)
+            val durationSaved = repository.saveLockDuration(durationMinutes)
+            val manifestSaved = repository.saveRecoveryManifest(
                 originalUri = uri.toString(),
                 displayName = originalMeta.displayName ?: "",
                 mimeType = originalMeta.mimeType ?: "image/jpeg",
@@ -431,7 +448,7 @@ class MainViewModel(
                 endTimeUtc = 0L,
                 durationMs = durationMinutes * 60 * 1000L
             )
-            s
+            txSaved && metaSaved && shaSaved && durationSaved && manifestSaved
         }
 
         if (!earlySaveSuccess) {
@@ -654,7 +671,7 @@ class MainViewModel(
     fun switchToEmergencyRecovery() {
         if (_uiState.value == LockScreenState.PERSISTENCE_ERROR) {
             val manifest = repository.getRecoveryManifest()
-            if (manifest != null) {
+            if (manifest != null && manifest.endTimeUtc > 0L) {
                 _uiState.value = LockScreenState.EMERGENCY_RECOVERY
                 startEmergencyTimer()
             }
@@ -666,7 +683,7 @@ class MainViewModel(
         emergencyTimerJob = viewModelScope.launch {
             while (_uiState.value == LockScreenState.EMERGENCY_RECOVERY) {
                 val manifest = repository.getRecoveryManifest()
-                if (manifest == null) {
+                if (manifest == null || manifest.endTimeUtc <= 0L) {
                     _uiState.value = LockScreenState.IDLE
                     break
                 }
@@ -689,6 +706,7 @@ class MainViewModel(
     suspend fun emergencyExport(): Boolean {
         return withContext(Dispatchers.IO) {
             val manifest = repository.getRecoveryManifest() ?: return@withContext false
+            if (manifest.endTimeUtc <= 0L) return@withContext false
             val ntpTime = SntpClient.getCurrentTimeUtc() ?: return@withContext false
             if (ntpTime < manifest.endTimeUtc) {
                 return@withContext false

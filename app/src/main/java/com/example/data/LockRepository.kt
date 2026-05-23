@@ -180,7 +180,7 @@ class LockRepository(private val context: Context) {
                     }
                 }
             }
-            if (sha.isNotEmpty() && end > 0 && dur > 0 && name.isNotEmpty() && mime.isNotEmpty()) {
+            if (sha.isNotEmpty() && end >= 0 && dur > 0 && name.isNotEmpty() && mime.isNotEmpty()) {
                 ManifestData(uri, name, mime, size, sha, end, dur)
             } else {
                 null
